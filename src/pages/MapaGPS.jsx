@@ -1862,6 +1862,3 @@ const styles = {
     fontWeight: 700,
   },
 };
-'''
-Path("/mnt/data/MapaGPS.jsx").write_text(content, encoding="utf-8")
-print("/mnt/data/MapaGPS.jsx")
