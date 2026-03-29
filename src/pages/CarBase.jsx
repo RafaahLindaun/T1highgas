@@ -1,106 +1,60 @@
-// src/pages/CarBase.jsx
-import React, { useState } from 'react';
-import { motion } from 'framer-motion';
-import { useNavigate } from 'react-router-dom';
+import { useState, useEffect } from "react";
+import { useEco } from "../context/EcoContext";
 
 export default function CarBase() {
-  const [hasCar, setHasCar] = useState(false); // Simulação de banco de dados vazio
-  const navigate = useNavigate();
+  const { vehicle, setVehicle } = useEco();
+
+  const [model, setModel] = useState("");
+  const [fuel, setFuel] = useState("Gasolina");
+  const [consumption, setConsumption] = useState("");
+  const [fuelPrice, setFuelPrice] = useState("");
+
+  useEffect(() => {
+    if (!vehicle) return;
+    setModel(vehicle.model || "");
+    setFuel(vehicle.fuel || "Gasolina");
+    setConsumption(vehicle.consumption || "");
+    setFuelPrice(vehicle.fuelPrice || "");
+  }, [vehicle]);
+
+  function save() {
+    setVehicle({ model, fuel, consumption, fuelPrice });
+    alert("Carro salvo (IA já consegue ler).");
+  }
 
   return (
-    <div style={styles.container}>
-      {!hasCar ? (
-        <motion.div 
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          style={styles.emptyState}
-        >
-          <div style={styles.ghostIcon}>⎈</div>
-          <h1 style={styles.title}>SEM CARROS<br/>SALVOS AINDA.</h1>
-          <p style={styles.subtitle}>“NÃO TEM PROBLEMA”</p>
-          
-          <div style={styles.infoBox}>
-            O APP ESTÁ OPERANDO EM <b>MODO NAVEGAÇÃO</b> (ESTILO WAZE). 
-            PARA ATIVAR A <b>ECONOMIA PREDITIVA</b>, PRECISAMOS CONHECER SEU MOTOR.
-          </div>
+    <div className="container page">
+      <h1>CarBase</h1>
+      <p>Dados do veículo para cálculo de custo.</p>
 
-          <motion.button 
-            whileTap={{ scale: 0.95 }}
-            onClick={() => navigate('/ia')}
-            style={styles.btnPrimary}
-          >
-            VOLTAR PARA IA
-          </motion.button>
-        </motion.div>
-      ) : (
-        <div style={styles.hasCarState}>
-          {/* Aqui apareceria o carro já salvo no futuro */}
-          <h1 style={styles.title}>GARAGEM ATIVA.</h1>
-        </div>
-      )}
+      <div className="card" style={{ flexDirection: "column", alignItems: "stretch" }}>
+        <label style={lbl}>Modelo</label>
+        <input value={model} onChange={(e) => setModel(e.target.value)} style={inp} placeholder="Ex: Onix 1.0" />
+
+        <label style={lbl}>Combustível</label>
+        <select value={fuel} onChange={(e) => setFuel(e.target.value)} style={inp}>
+          <option>Gasolina</option>
+          <option>Etanol</option>
+          <option>Diesel</option>
+          <option>Elétrico</option>
+        </select>
+
+        <label style={lbl}>Consumo (km/L ou km/kWh)</label>
+        <input value={consumption} onChange={(e) => setConsumption(e.target.value)} style={inp} placeholder="Ex: 12.5" />
+
+        <label style={lbl}>Preço (R$/L ou R$/kWh)</label>
+        <input value={fuelPrice} onChange={(e) => setFuelPrice(e.target.value)} style={inp} placeholder="Ex: 5.79" />
+
+        <button onClick={save} style={btn}>Salvar</button>
+
+        <button onClick={() => setVehicle(null)} style={{ ...btn, background: "#0f172a", marginTop: 10 }}>
+          Limpar
+        </button>
+      </div>
     </div>
   );
 }
 
-const styles = {
-  container: {
-    height: '100vh',
-    background: '#FFF',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: '30px',
-    textAlign: 'center'
-  },
-  emptyState: {
-    maxWidth: '350px',
-    display: 'flex',
-    flexDirection: 'column',
-    alignItems: 'center'
-  },
-  ghostIcon: {
-    fontSize: '60px',
-    color: '#000',
-    marginBottom: '20px',
-    opacity: 0.1
-  },
-  title: {
-    fontSize: '32px',
-    fontWeight: 900, // ULTRA BOLD
-    letterSpacing: '-1.5px',
-    lineHeight: '0.9',
-    color: '#000',
-    marginBottom: '10px'
-  },
-  subtitle: {
-    fontSize: '14px',
-    fontWeight: 700,
-    color: '#000',
-    opacity: 0.4,
-    marginBottom: '40px',
-    letterSpacing: '2px'
-  },
-  infoBox: {
-    fontSize: '11px',
-    lineHeight: '1.6',
-    color: '#000',
-    background: 'rgba(0,0,0,0.03)',
-    padding: '20px',
-    borderRadius: '25px',
-    marginBottom: '40px',
-    textTransform: 'uppercase',
-    letterSpacing: '0.5px'
-  },
-  btnPrimary: {
-    background: '#000',
-    color: '#FFF',
-    border: 'none',
-    padding: '18px 40px',
-    borderRadius: '35px',
-    fontSize: '12px',
-    fontWeight: 900,
-    letterSpacing: '2px',
-    cursor: 'pointer',
-    boxShadow: '0 20px 40px rgba(0,0,0,0.1)'
-  }
-};
+const lbl = { fontSize: 12, fontWeight: 800, color: "#64748b" };
+const inp = { width: "100%", padding: 12, borderRadius: 12, border: "1px solid #e5e7eb", margin: "6px 0 14px" };
+const btn = { padding: 12, borderRadius: 12, border: "none", background: "#d97706", color: "#fff", fontWeight: 900, cursor: "pointer" };
