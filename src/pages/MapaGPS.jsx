@@ -41,46 +41,6 @@ function writeJSON(key, value) {
   } catch {}
 }
 
-function loadLeaflet() {
-  if (window.L) return Promise.resolve(window.L);
-
-  return new Promise((resolve, reject) => {
-    const cssId = "leaflet-css";
-    if (!document.getElementById(cssId)) {
-      const link = document.createElement("link");
-      link.id = cssId;
-      link.rel = "stylesheet";
-      link.href = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css";
-      document.head.appendChild(link);
-    }
-
-    const jsId = "leaflet-js";
-    if (document.getElementById(jsId)) {
-      const t = setInterval(() => {
-        if (window.L) {
-          clearInterval(t);
-          resolve(window.L);
-        }
-      }, 50);
-
-      setTimeout(() => {
-        clearInterval(t);
-        reject(new Error("Leaflet demorou para carregar."));
-      }, 8000);
-
-      return;
-    }
-
-    const script = document.createElement("script");
-    script.id = jsId;
-    script.src = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js";
-    script.async = true;
-    script.onload = () => resolve(window.L);
-    script.onerror = () => reject(new Error("Falha ao carregar Leaflet via CDN."));
-    document.body.appendChild(script);
-  });
-}
-
 function n(v) {
   const num = Number(String(v ?? "").replace(",", "."));
   return Number.isFinite(num) ? num : null;
@@ -251,6 +211,34 @@ function countPoiNearRoute(routeCoords, pois, thresholdMeters = 120) {
   return count;
 }
 
+function readTank() {
+  const t = readJSON(TANK_KEY, { capacityL: 50, levelL: 50 });
+  const cap = n(t.capacityL) ?? 50;
+  const lvl = n(t.levelL) ?? cap;
+  return { capacityL: cap, levelL: clamp(lvl, 0, cap) };
+}
+
+function writeTank(tank) {
+  writeJSON(TANK_KEY, tank);
+}
+
+function readVisited() {
+  return readJSON(VISITED_KEY, []);
+}
+
+function writeVisited(points) {
+  writeJSON(VISITED_KEY, points.slice(-2000));
+}
+
+function getRouteMode() {
+  const m = localStorage.getItem(ROUTE_MODE_KEY);
+  return m === "fast" || m === "balanced" || m === "eco" ? m : "eco";
+}
+
+function setRouteModeStorage(v) {
+  localStorage.setItem(ROUTE_MODE_KEY, v);
+}
+
 async function geocodeOne(query) {
   const coord = parseCoordinates(query);
   if (coord) return coord;
@@ -373,34 +361,6 @@ out center;`;
     .filter(Boolean);
 }
 
-function readTank() {
-  const t = readJSON(TANK_KEY, { capacityL: 50, levelL: 50 });
-  const cap = n(t.capacityL) ?? 50;
-  const lvl = n(t.levelL) ?? cap;
-  return { capacityL: cap, levelL: clamp(lvl, 0, cap) };
-}
-
-function writeTank(tank) {
-  writeJSON(TANK_KEY, tank);
-}
-
-function readVisited() {
-  return readJSON(VISITED_KEY, []);
-}
-
-function writeVisited(points) {
-  writeJSON(VISITED_KEY, points.slice(-2000));
-}
-
-function getRouteMode() {
-  const m = localStorage.getItem(ROUTE_MODE_KEY);
-  return m === "fast" || m === "balanced" || m === "eco" ? m : "eco";
-}
-
-function setRouteModeStorage(v) {
-  localStorage.setItem(ROUTE_MODE_KEY, v);
-}
-
 function iconSvg(type) {
   const common =
     'width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#0F172A" stroke-width="2.35" stroke-linecap="round" stroke-linejoin="round"';
@@ -460,6 +420,77 @@ function makeMapIcon(L, kind) {
   });
 }
 
+function loadLeaflet() {
+  if (window.L) return Promise.resolve(window.L);
+
+  return new Promise((resolve, reject) => {
+    const cssId = "leaflet-css";
+    if (!document.getElementById(cssId)) {
+      const link = document.createElement("link");
+      link.id = cssId;
+      link.rel = "stylesheet";
+      link.href = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css";
+      document.head.appendChild(link);
+    }
+
+    const jsId = "leaflet-js";
+    if (document.getElementById(jsId)) {
+      const t = setInterval(() => {
+        if (window.L) {
+          clearInterval(t);
+          resolve(window.L);
+        }
+      }, 50);
+
+      setTimeout(() => {
+        clearInterval(t);
+        reject(new Error("Leaflet demorou para carregar."));
+      }, 8000);
+
+      return;
+    }
+
+    const script = document.createElement("script");
+    script.id = jsId;
+    script.src = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js";
+    script.async = true;
+    script.onload = () => resolve(window.L);
+    script.onerror = () => reject(new Error("Falha ao carregar Leaflet via CDN."));
+    document.body.appendChild(script);
+  });
+}
+
+function createUserIcon(L, heading = 0, accent = C.accent) {
+  return L.divIcon({
+    className: "eco-user-heading",
+    html: `
+      <div style="position:relative;width:44px;height:44px;display:grid;place-items:center;">
+        <div style="
+          position:absolute;
+          top:4px;
+          width:0;height:0;
+          border-left:7px solid transparent;
+          border-right:7px solid transparent;
+          border-bottom:14px solid ${accent};
+          transform: rotate(${heading}deg);
+          transform-origin: center 18px;
+          filter: drop-shadow(0 8px 10px rgba(10,132,255,.25));
+        "></div>
+        <div style="
+          width:18px;height:18px;border-radius:999px;
+          background:${accent};
+          border:4px solid #fff;
+          box-shadow:0 14px 28px rgba(15,23,42,.18);
+          position:absolute;
+          z-index:2;
+        "></div>
+      </div>
+    `,
+    iconSize: [44, 44],
+    iconAnchor: [22, 22],
+  });
+}
+
 export default function MapaGPS() {
   const nav = useNavigate();
   const { vehicle, setDestination, setRoute, destination, route, addHistory } = useEco();
@@ -469,25 +500,24 @@ export default function MapaGPS() {
     L: null,
     map: null,
     userMarker: null,
-    userHeadingMarker: null,
     destMarker: null,
     routeLayer: null,
     altRouteLayer: null,
     passedLayer: null,
     poiLayers: { fuel: null, camera: null, toll: null },
     watchId: null,
-    lastGps: null,
   });
 
   const lastPanAtRef = useRef(0);
   const lastStableGpsRef = useRef(null);
   const lastHeadingRef = useRef(0);
+  const resizeHandlerRef = useRef(null);
   const clickTimer = useRef(null);
 
   const [ready, setReady] = useState(false);
   const [busy, setBusy] = useState({ map: true, route: false, pois: false });
   const [search, setSearch] = useState("");
-  const [gps, setGps] = useState({ lat: null, lon: null, heading: 0 });
+  const [gps, setGps] = useState({ lat: null, lon: null, heading: 0, accuracy: null });
   const [routeMode, setRouteMode] = useState(getRouteMode);
   const [routeAlternatives, setRouteAlternatives] = useState([]);
   const [activeRouteIndex, setActiveRouteIndex] = useState(0);
@@ -529,115 +559,8 @@ export default function MapaGPS() {
     document.head.appendChild(style);
   }, []);
 
-  function drawVisitedPath() {
-    const { L, map } = leafletRef.current;
-    if (!L || !map) return;
-
-    if (leafletRef.current.passedLayer) {
-      map.removeLayer(leafletRef.current.passedLayer);
-      leafletRef.current.passedLayer = null;
-    }
-
-    if (visitedPoints.length < 2) return;
-
-    const layer = L.polyline(
-      visitedPoints.map((p) => [p.lat, p.lon]),
-      {
-        color: C.roadVisited,
-        weight: 5,
-        opacity: 0.94,
-        lineCap: "round",
-        lineJoin: "round",
-      }
-    ).addTo(map);
-
-    leafletRef.current.passedLayer = layer;
-  }
-
-  function renderUserMarker(L, heading = 0) {
-    return L.divIcon({
-      className: "eco-user-heading",
-      html: `
-        <div style="position:relative;width:44px;height:44px;display:grid;place-items:center;">
-          <div style="
-            position:absolute;
-            top:4px;
-            width:0;height:0;
-            border-left:7px solid transparent;
-            border-right:7px solid transparent;
-            border-bottom:14px solid ${C.accent};
-            transform: rotate(${heading}deg);
-            transform-origin: center 18px;
-            filter: drop-shadow(0 8px 10px rgba(10,132,255,.25));
-          "></div>
-          <div style="
-            width:18px;height:18px;border-radius:999px;
-            background:${C.accent};
-            border:4px solid #fff;
-            box-shadow:0 14px 28px rgba(15,23,42,.18);
-            position:absolute;
-            z-index:2;
-          "></div>
-        </div>
-      `,
-      iconSize: [44, 44],
-      iconAnchor: [22, 22],
-    });
-  }
-
-  function updateThirdPersonCamera(pos) {
-    const { map } = leafletRef.current;
-    if (!map || !navMode) return;
-
-    const latlng = [pos.lat, pos.lon];
-    const p = map.project(latlng, map.getZoom());
-
-    const centerPoint = { x: p.x, y: p.y + 170 };
-    const center = map.unproject(centerPoint, map.getZoom());
-
-    map.setView(center, Math.max(map.getZoom(), 17), { animate: true });
-  }
-
-  useEffect(() => {
-    drawVisitedPath();
-  }, [visitedPoints]);
-
-  function renderPoiLayers() {
-    const { L, map } = leafletRef.current;
-    if (!L || !map) return;
-
-    ["fuel", "camera", "toll"].forEach((kind) => {
-      const current = leafletRef.current.poiLayers[kind];
-      if (current) {
-        map.removeLayer(current);
-        leafletRef.current.poiLayers[kind] = null;
-      }
-
-      if (!poiVisible[kind]) return;
-      const items = poiData[kind] || [];
-      if (!items.length) return;
-
-      const layer = L.layerGroup();
-      const icon = makeMapIcon(L, kind);
-
-      items.forEach((item) => {
-        L.marker([item.lat, item.lon], { icon })
-          .addTo(layer)
-          .bindPopup(item.label || (kind === "fuel" ? "Posto" : kind === "camera" ? "Radar" : "Pedágio"));
-      });
-
-      layer.addTo(map);
-      leafletRef.current.poiLayers[kind] = layer;
-    });
-  }
-
-  useEffect(() => {
-    renderPoiLayers();
-  }, [poiData, poiVisible]);
-
   useEffect(() => {
     let mounted = true;
-    let resizeMap = null;
 
     (async () => {
       try {
@@ -673,7 +596,7 @@ export default function MapaGPS() {
 
         const userMarker = L.marker(
           [DEFAULT_CENTER.lat, DEFAULT_CENTER.lon],
-          { icon: renderUserMarker(L, 0) }
+          { icon: createUserIcon(L, 0) }
         ).addTo(map);
 
         map.on("click", (e) => {
@@ -686,82 +609,13 @@ export default function MapaGPS() {
 
         setTimeout(() => map.invalidateSize(), 250);
 
-        resizeMap = () => {
+        const resizeMap = () => {
           setTimeout(() => map.invalidateSize(), 120);
         };
+        resizeHandlerRef.current = resizeMap;
 
         window.addEventListener("resize", resizeMap);
         window.addEventListener("orientationchange", resizeMap);
-
-        if ("geolocation" in navigator) {
-          const watchId = navigator.geolocation.watchPosition(
-            (pos) => {
-              const { latitude, longitude, heading, accuracy } = pos.coords;
-              const prev = lastStableGpsRef.current;
-
-              if (accuracy && accuracy > 80) return;
-
-              let computedHeading =
-                Number.isFinite(heading) && heading !== null ? heading : lastHeadingRef.current || 0;
-
-              if (prev) {
-                const dKm = haversineKm(prev.lat, prev.lon, latitude, longitude);
-                if (dKm > 0.005) {
-                  computedHeading = bearingDeg(prev.lat, prev.lon, latitude, longitude);
-                } else {
-                  computedHeading = lastHeadingRef.current || computedHeading;
-                }
-              }
-
-              lastHeadingRef.current = computedHeading;
-
-              const nextGps = { lat: latitude, lon: longitude, heading: computedHeading };
-              setGps(nextGps);
-              leafletRef.current.lastGps = nextGps;
-              lastStableGpsRef.current = nextGps;
-
-              const ll = [latitude, longitude];
-              userMarker.setLatLng(ll);
-              userMarker.setIcon(renderUserMarker(L, computedHeading));
-
-              if (tripActive && prev) {
-                const dKm = haversineKm(prev.lat, prev.lon, latitude, longitude);
-                const cons = n(vehicle?.consumption) ?? 10;
-                const usedL = dKm / cons;
-
-                if (dKm > 0.003) {
-                  setVisitedPoints((list) => [...list, { lat: latitude, lon: longitude }].slice(-2000));
-                }
-
-                if (usedL > 0 && dKm > 0.003) {
-                  setTank((t) => ({ ...t, levelL: clamp(t.levelL - usedL, 0, t.capacityL) }));
-                }
-              }
-
-              const now = Date.now();
-
-              if (navMode) {
-                if (now - lastPanAtRef.current > 700) {
-                  updateThirdPersonCamera(nextGps);
-                  lastPanAtRef.current = now;
-                }
-              } else {
-                if (now - lastPanAtRef.current > 1200) {
-                  map.panTo(ll, { animate: true, duration: 0.45 });
-                  lastPanAtRef.current = now;
-                }
-              }
-            },
-            (err) => console.error("GPS erro:", err),
-            {
-              enableHighAccuracy: true,
-              timeout: 12000,
-              maximumAge: 1200,
-            }
-          );
-
-          leafletRef.current.watchId = watchId;
-        }
 
         setBusy((s) => ({ ...s, map: false }));
         setReady(true);
@@ -773,11 +627,9 @@ export default function MapaGPS() {
 
     return () => {
       mounted = false;
-      const { map, watchId } = leafletRef.current;
 
-      if (watchId != null && "geolocation" in navigator) {
-        navigator.geolocation.clearWatch(watchId);
-      }
+      const { map } = leafletRef.current;
+      const resizeMap = resizeHandlerRef.current;
 
       if (resizeMap) {
         window.removeEventListener("resize", resizeMap);
@@ -790,8 +642,158 @@ export default function MapaGPS() {
       }
 
       leafletRef.current.map = null;
+      leafletRef.current.userMarker = null;
     };
-  }, [tripActive, navMode, vehicle?.consumption, setDestination]);
+  }, [setDestination]);
+
+  useEffect(() => {
+    if (!("geolocation" in navigator)) return;
+    const { L, map, userMarker } = leafletRef.current;
+    if (!L || !map || !userMarker) return;
+
+    const watchId = navigator.geolocation.watchPosition(
+      (pos) => {
+        const { latitude, longitude, heading, accuracy } = pos.coords;
+        const prev = lastStableGpsRef.current;
+
+        if (accuracy && accuracy > 80) return;
+
+        let computedHeading =
+          Number.isFinite(heading) && heading !== null ? heading : lastHeadingRef.current || 0;
+
+        if (prev) {
+          const dKm = haversineKm(prev.lat, prev.lon, latitude, longitude);
+          if (dKm > 0.005) {
+            computedHeading = bearingDeg(prev.lat, prev.lon, latitude, longitude);
+          } else {
+            computedHeading = lastHeadingRef.current || computedHeading;
+          }
+        }
+
+        lastHeadingRef.current = computedHeading;
+
+        const nextGps = {
+          lat: latitude,
+          lon: longitude,
+          heading: computedHeading,
+          accuracy: accuracy ?? null,
+        };
+
+        setGps(nextGps);
+        lastStableGpsRef.current = nextGps;
+
+        userMarker.setLatLng([latitude, longitude]);
+        userMarker.setIcon(createUserIcon(L, computedHeading));
+
+        if (tripActive && prev) {
+          const dKm = haversineKm(prev.lat, prev.lon, latitude, longitude);
+          const cons = n(vehicle?.consumption) ?? 10;
+          const usedL = dKm / cons;
+
+          if (dKm > 0.003) {
+            setVisitedPoints((list) =>
+              [...list, { lat: latitude, lon: longitude }].slice(-2000)
+            );
+          }
+
+          if (usedL > 0 && dKm > 0.003) {
+            setTank((t) => ({
+              ...t,
+              levelL: clamp(t.levelL - usedL, 0, t.capacityL),
+            }));
+          }
+        }
+
+        const now = Date.now();
+
+        if (navMode) {
+          if (now - lastPanAtRef.current > 700) {
+            const p = map.project([latitude, longitude], map.getZoom());
+            const centerPoint = { x: p.x, y: p.y + 170 };
+            const center = map.unproject(centerPoint, map.getZoom());
+            map.setView(center, Math.max(map.getZoom(), 17), { animate: true });
+            lastPanAtRef.current = now;
+          }
+        } else {
+          if (now - lastPanAtRef.current > 1200) {
+            map.panTo([latitude, longitude], { animate: true, duration: 0.45 });
+            lastPanAtRef.current = now;
+          }
+        }
+      },
+      (err) => console.error("GPS erro:", err),
+      {
+        enableHighAccuracy: true,
+        timeout: 12000,
+        maximumAge: 1200,
+      }
+    );
+
+    leafletRef.current.watchId = watchId;
+
+    return () => {
+      if (watchId != null) navigator.geolocation.clearWatch(watchId);
+      leafletRef.current.watchId = null;
+    };
+  }, [navMode, tripActive, vehicle?.consumption]);
+
+  useEffect(() => {
+    const { L, map } = leafletRef.current;
+    if (!L || !map || visitedPoints.length < 2) {
+      if (leafletRef.current.passedLayer && map) {
+        map.removeLayer(leafletRef.current.passedLayer);
+        leafletRef.current.passedLayer = null;
+      }
+      return;
+    }
+
+    if (leafletRef.current.passedLayer) {
+      map.removeLayer(leafletRef.current.passedLayer);
+      leafletRef.current.passedLayer = null;
+    }
+
+    const layer = L.polyline(
+      visitedPoints.map((p) => [p.lat, p.lon]),
+      {
+        color: C.roadVisited,
+        weight: 5,
+        opacity: 0.94,
+        lineCap: "round",
+        lineJoin: "round",
+      }
+    ).addTo(map);
+
+    leafletRef.current.passedLayer = layer;
+  }, [visitedPoints]);
+
+  useEffect(() => {
+    const { L, map } = leafletRef.current;
+    if (!L || !map) return;
+
+    ["fuel", "camera", "toll"].forEach((kind) => {
+      const current = leafletRef.current.poiLayers[kind];
+      if (current) {
+        map.removeLayer(current);
+        leafletRef.current.poiLayers[kind] = null;
+      }
+
+      if (!poiVisible[kind]) return;
+      const items = poiData[kind] || [];
+      if (!items.length) return;
+
+      const layer = L.layerGroup();
+      const icon = makeMapIcon(L, kind);
+
+      items.forEach((item) => {
+        L.marker([item.lat, item.lon], { icon })
+          .addTo(layer)
+          .bindPopup(item.label || kind);
+      });
+
+      layer.addTo(map);
+      leafletRef.current.poiLayers[kind] = layer;
+    });
+  }, [poiData, poiVisible]);
 
   useEffect(() => {
     const { L, map } = leafletRef.current;
@@ -809,18 +811,30 @@ export default function MapaGPS() {
       iconAnchor: [14, 14],
     });
 
-    leafletRef.current.destMarker = L.marker([destination.lat, destination.lon], { icon: destIcon })
+    leafletRef.current.destMarker = L.marker(
+      [destination.lat, destination.lon],
+      { icon: destIcon }
+    )
       .addTo(map)
       .bindPopup(destination.label || "Destino");
 
     map.flyTo([destination.lat, destination.lon], 16, { duration: 0.55 });
+  }, [destination]);
 
-    if (gps.lat != null && gps.lon != null) {
-      buildRoutes({ lat: gps.lat, lon: gps.lon }, destination).catch(console.error);
-    }
-  }, [destination, gps.lat, gps.lon, routeMode]);
+  useEffect(() => {
+    if (!destination) return;
+    if (gps.lat == null || gps.lon == null) return;
 
-  async function buildRoutes(from, to) {
+    buildRoutes(
+      { lat: gps.lat, lon: gps.lon },
+      destination,
+      routeMode,
+      vehicle
+    ).catch(console.error);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [destination, routeMode, vehicle?.consumption, vehicle?.fuelPrice]);
+
+  async function buildRoutes(from, to, mode, currentVehicle) {
     const { L, map } = leafletRef.current;
     if (!L || !map) return;
 
@@ -847,8 +861,8 @@ export default function MapaGPS() {
     }
 
     let alternatives = routes.map((r, idx) => {
-      const cons = n(vehicle?.consumption);
-      const price = n(vehicle?.fuelPrice);
+      const cons = n(currentVehicle?.consumption);
+      const price = n(currentVehicle?.fuelPrice);
       const liters = cons && cons > 0 ? km(r.distance) / cons : null;
       const cost = liters != null && price && price > 0 ? liters * price : null;
 
@@ -871,8 +885,7 @@ export default function MapaGPS() {
       const ascentResults = await Promise.all(
         alternatives.map(async (alt) => {
           const samples = sampleRoutePoints(alt.routeCoords, 26);
-          const ascent = await estimateAscentM(samples);
-          return ascent;
+          return estimateAscentM(samples);
         })
       );
 
@@ -898,15 +911,16 @@ export default function MapaGPS() {
     }));
 
     alternatives = alternatives.map((alt) => {
-      const liters = alt.liters ?? km(alt.distanceM) / (n(vehicle?.consumption) || 10);
+      const liters =
+        alt.liters ?? km(alt.distanceM) / (n(currentVehicle?.consumption) || 10);
       const ascentPenalty = (alt.ascentM ?? 0) * 0.00008;
       const tollPenalty = alt.tollCount * 0.12;
       const speedPenalty = alt.cameraCount * 0.04;
       const timeH = alt.durationS / 3600;
 
       let score = liters + ascentPenalty + tollPenalty + speedPenalty;
-      if (routeMode === "fast") score = timeH + speedPenalty * 0.25;
-      if (routeMode === "balanced") {
+      if (mode === "fast") score = timeH + speedPenalty * 0.25;
+      if (mode === "balanced") {
         score = liters * 0.75 + ascentPenalty + tollPenalty * 0.5 + timeH * 0.25;
       }
 
@@ -914,7 +928,7 @@ export default function MapaGPS() {
     });
 
     const best =
-      routeMode === "fast"
+      mode === "fast"
         ? alternatives.slice().sort((a, b) => a.durationS - b.durationS)[0]
         : alternatives.slice().sort((a, b) => a.score - b.score)[0];
 
@@ -935,7 +949,7 @@ export default function MapaGPS() {
       tollCount: best.tollCount,
       cameraCount: best.cameraCount,
       fuelCount: best.fuelCount,
-      mode: routeMode,
+      mode,
     };
 
     setRoute(payload);
@@ -1357,7 +1371,9 @@ export default function MapaGPS() {
                   </div>
 
                   {fuelCalc?.liters != null && tank.levelL < fuelCalc.liters && (
-                    <div style={styles.warningBox}>Combustível insuficiente para essa rota.</div>
+                    <div style={styles.warningBox}>
+                      Combustível insuficiente para essa rota.
+                    </div>
                   )}
                 </>
               )}
