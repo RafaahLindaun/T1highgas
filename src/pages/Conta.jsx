@@ -1,7 +1,17 @@
 import { useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { AnimatePresence, motion } from "framer-motion";
 import { useAuth } from "../context/AuthContext";
 import { useEco } from "../context/EcoContext";
+
+/**
+ * Conta.jsx
+ * - Estética: iOS-like (glass + blur), mais retangular
+ * - Tipografia: “Ferrari vibe” (peso alto + uppercase em títulos)
+ * - Paleta 60/30/10 (claro): 60% fundo, 30% superfícies, 10% acento (vermelho)
+ * - Info breve/direta, avatar no canto esquerdo
+ * - Mantém funcionalidades: foto, editar perfil, migração de email, eco profile
+ */
 
 export default function Conta() {
   const { user, updateUser, logout } = useAuth();
@@ -58,18 +68,21 @@ export default function Conta() {
   }
 
   function migrateEmailData(oldEmail, newEmail) {
+    // pagamentos
     const oldKeyPay = `payments_${oldEmail}`;
     const newKeyPay = `payments_${newEmail}`;
     const payRaw = localStorage.getItem(oldKeyPay);
     if (payRaw && !localStorage.getItem(newKeyPay)) localStorage.setItem(newKeyPay, payRaw);
     if (payRaw) localStorage.removeItem(oldKeyPay);
 
+    // status pago
     const oldPaid = `paid_${oldEmail}`;
     const newPaid = `paid_${newEmail}`;
     const paid = localStorage.getItem(oldPaid);
     if (paid && !localStorage.getItem(newPaid)) localStorage.setItem(newPaid, paid);
     if (paid) localStorage.removeItem(oldPaid);
 
+    // EcoContext por email (v2)
     const oldEco = `@EcoRoute:EcoState:${oldEmail}:v2`;
     const newEco = `@EcoRoute:EcoState:${newEmail}:v2`;
     const ecoRaw = localStorage.getItem(oldEco);
@@ -101,285 +114,463 @@ export default function Conta() {
 
   if (!user) return null;
 
+  const chips = [
+    user?.idade ? { k: "Idade", v: `${user.idade}` } : null,
+    user?.altura ? { k: "Altura", v: `${user.altura}cm` } : null,
+    user?.peso ? { k: "Peso", v: `${user.peso}kg` } : null,
+  ].filter(Boolean);
+
   return (
-    <div style={styles.page}>
-      <input ref={fileRef} type="file" accept="image/*" style={{ display: "none" }} onChange={onFile} />
+    <div style={S.page}>
+      <input
+        ref={fileRef}
+        type="file"
+        accept="image/*"
+        style={{ display: "none" }}
+        onChange={onFile}
+      />
 
-      <div style={styles.hero}>
-        <div style={styles.heroGlass} />
+      <motion.div
+        initial={{ opacity: 0, y: 10, filter: "blur(6px)" }}
+        animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
+        transition={{ duration: 0.35, ease: "easeOut" }}
+        style={S.shell}
+      >
+        {/* Header Card */}
+        <div style={S.headerCard}>
+          <div style={S.headerGlass} />
+          <div style={S.headerAccent} />
 
-        <div style={styles.profileRow}>
-          <div style={styles.avatarWrap} onClick={pickPhoto} title="Trocar foto">
-            {photo ? (
-              <img src={photo} alt="avatar" style={styles.avatarImg} />
-            ) : (
-              <div style={styles.avatarFallback}>{user.nome?.[0]?.toUpperCase() || "U"}</div>
-            )}
-            <div style={styles.badge}>TROCAR</div>
-          </div>
+          <div style={S.profileRow}>
+            {/* Avatar (canto esquerdo) */}
+            <motion.button
+              type="button"
+              onClick={pickPhoto}
+              whileTap={{ scale: 0.98 }}
+              style={S.avatarBtn}
+              aria-label="Trocar foto"
+              title="Trocar foto"
+            >
+              {photo ? (
+                <img src={photo} alt="avatar" style={S.avatarImg} />
+              ) : (
+                <div style={S.avatarFallback}>
+                  {user.nome?.[0]?.toUpperCase() || "U"}
+                </div>
+              )}
+              <div style={S.avatarBadge}>Editar</div>
+            </motion.button>
 
-          <div style={styles.info}>
-            <div style={styles.name}>{user.nome}</div>
-            <div style={styles.email}>{user.email}</div>
-          </div>
-        </div>
+            {/* Info (breve e direta) */}
+            <div style={S.profileInfo}>
+              <div style={S.name}>{user.nome}</div>
+              <div style={S.email}>{user.email}</div>
 
-        <div style={styles.actions}>
-          <button style={styles.btnPrimary} onClick={openEdit}>
-            Editar dados
-          </button>
-
-          <button style={styles.btnAccent} onClick={() => nav("/pagamentos")}>
-            Pagamentos
-          </button>
-
-          <button
-            style={styles.btnGhost}
-            onClick={() => {
-              logout();
-              nav("/");
-            }}
-          >
-            Sair
-          </button>
-        </div>
-      </div>
-
-      <div style={styles.card}>
-        <div style={styles.cardTitle}>PERFIL ECO</div>
-
-        <div style={styles.row}>
-          <div style={styles.rowLabel}>Carro ativo</div>
-          <div style={styles.rowValue}>{vehicle?.model || "—"}</div>
-        </div>
-
-        <div style={styles.row}>
-          <div style={styles.rowLabel}>Modo de rota</div>
-          <select value={routeMode} onChange={(e) => setRouteMode(e.target.value)} style={styles.select}>
-            <option value="eco">Eco</option>
-            <option value="balanced">Balanceado</option>
-            <option value="fast">Rápido</option>
-          </select>
-        </div>
-
-        <div style={styles.grid2}>
-          <div>
-            <div style={styles.miniLabel}>Tanque (L)</div>
-            <input
-              value={String(tank.capacityL)}
-              onChange={(e) => setTank({ capacityL: e.target.value })}
-              style={styles.input}
-              inputMode="decimal"
-            />
-          </div>
-
-          <div>
-            <div style={styles.miniLabel}>Nível (L)</div>
-            <input
-              value={String(tank.levelL)}
-              onChange={(e) => setTank({ levelL: e.target.value })}
-              style={styles.input}
-              inputMode="decimal"
-            />
-          </div>
-        </div>
-
-        <div style={styles.hint}>
-          O nível do tanque cai automaticamente no <b>GO</b> no mapa.
-        </div>
-      </div>
-
-      {editOpen && (
-        <div style={styles.modalOverlay} onClick={closeEdit}>
-          <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
-            <div style={styles.modalTitle}>EDITAR DADOS</div>
-            <div style={styles.modalSub}>Salvo na sua conta.</div>
-
-            <div style={styles.formGrid}>
-              <input style={styles.input} name="nome" placeholder="Nome" value={form.nome} onChange={onFormChange} />
-              <input style={styles.input} name="email" placeholder="Email" value={form.email} onChange={onFormChange} />
-
-              <div style={styles.row2}>
-                <input style={styles.input} name="idade" placeholder="Idade" value={form.idade} onChange={onFormChange} inputMode="numeric" />
-                <input style={styles.input} name="altura" placeholder="Altura (cm)" value={form.altura} onChange={onFormChange} inputMode="numeric" />
-              </div>
-
-              <input style={styles.input} name="peso" placeholder="Peso (kg)" value={form.peso} onChange={onFormChange} inputMode="decimal" />
-
-              {editMsg ? <div style={styles.modalMsg}>{editMsg}</div> : null}
-
-              <div style={styles.modalActions}>
-                <button style={styles.modalCancel} onClick={closeEdit}>
-                  Cancelar
-                </button>
-                <button style={styles.modalSave} onClick={saveProfile}>
-                  Salvar
-                </button>
+              <div style={S.chipsRow}>
+                {chips.length ? (
+                  chips.map((c, idx) => (
+                    <motion.div
+                      key={idx}
+                      initial={{ opacity: 0, y: 6 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      transition={{ duration: 0.22, delay: 0.05 * idx }}
+                      style={S.chip}
+                    >
+                      <span style={S.chipK}>{c.k}</span>
+                      <span style={S.chipV}>{c.v}</span>
+                    </motion.div>
+                  ))
+                ) : (
+                  <div style={{ ...S.chip, opacity: 0.75 }}>
+                    <span style={S.chipK}>Perfil</span>
+                    <span style={S.chipV}>Completar</span>
+                  </div>
+                )}
               </div>
             </div>
           </div>
+
+          {/* Ações */}
+          <div style={S.actionsRow}>
+            <button style={S.btnSoft} onClick={openEdit}>
+              Editar
+            </button>
+            <button style={S.btnAccent} onClick={() => nav("/pagamentos")}>
+              Pagamentos
+            </button>
+            <button
+              style={S.btnGhost}
+              onClick={() => {
+                logout();
+                nav("/");
+              }}
+            >
+              Sair
+            </button>
+          </div>
         </div>
-      )}
+
+        {/* Eco Profile (compacto) */}
+        <div style={S.card}>
+          <div style={S.cardTitle}>ECO</div>
+
+          <div style={S.kvRow}>
+            <div style={S.kvKey}>Carro</div>
+            <div style={S.kvVal} title={vehicle?.model || ""}>
+              {vehicle?.model || "—"}
+            </div>
+          </div>
+
+          <div style={S.kvRow}>
+            <div style={S.kvKey}>Modo</div>
+            <select
+              value={routeMode}
+              onChange={(e) => setRouteMode(e.target.value)}
+              style={S.select}
+            >
+              <option value="eco">Eco</option>
+              <option value="balanced">Balanceado</option>
+              <option value="fast">Rápido</option>
+            </select>
+          </div>
+
+          <div style={S.grid2}>
+            <div>
+              <div style={S.label}>Tanque (L)</div>
+              <input
+                value={String(tank.capacityL)}
+                onChange={(e) => setTank({ capacityL: e.target.value })}
+                style={S.input}
+                inputMode="decimal"
+              />
+            </div>
+
+            <div>
+              <div style={S.label}>Nível (L)</div>
+              <input
+                value={String(tank.levelL)}
+                onChange={(e) => setTank({ levelL: e.target.value })}
+                style={S.input}
+                inputMode="decimal"
+              />
+            </div>
+          </div>
+
+          <div style={S.note}>
+            GO no mapa debita o tanque automaticamente.
+          </div>
+        </div>
+      </motion.div>
+
+      {/* Modal Edit (sheet iOS-like) */}
+      <AnimatePresence>
+        {editOpen && (
+          <motion.div
+            style={S.overlay}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onClick={closeEdit}
+          >
+            <motion.div
+              initial={{ y: 24, opacity: 0, scale: 0.98 }}
+              animate={{ y: 0, opacity: 1, scale: 1 }}
+              exit={{ y: 24, opacity: 0, scale: 0.98 }}
+              transition={{ type: "spring", stiffness: 320, damping: 26 }}
+              style={S.sheet}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div style={S.sheetHandle} />
+              <div style={S.sheetTitle}>EDITAR PERFIL</div>
+
+              <div style={S.form}>
+                <input
+                  style={S.input}
+                  name="nome"
+                  placeholder="Nome"
+                  value={form.nome}
+                  onChange={onFormChange}
+                />
+                <input
+                  style={S.input}
+                  name="email"
+                  placeholder="Email"
+                  value={form.email}
+                  onChange={onFormChange}
+                />
+
+                <div style={S.row2}>
+                  <input
+                    style={S.input}
+                    name="idade"
+                    placeholder="Idade"
+                    value={form.idade}
+                    onChange={onFormChange}
+                    inputMode="numeric"
+                  />
+                  <input
+                    style={S.input}
+                    name="altura"
+                    placeholder="Altura (cm)"
+                    value={form.altura}
+                    onChange={onFormChange}
+                    inputMode="numeric"
+                  />
+                </div>
+
+                <input
+                  style={S.input}
+                  name="peso"
+                  placeholder="Peso (kg)"
+                  value={form.peso}
+                  onChange={onFormChange}
+                  inputMode="decimal"
+                />
+
+                {editMsg ? <div style={S.msg}>{editMsg}</div> : null}
+
+                <div style={S.sheetActions}>
+                  <button style={S.btnSoft} onClick={closeEdit}>
+                    Cancelar
+                  </button>
+                  <button style={S.btnAccent} onClick={saveProfile}>
+                    Salvar
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
 
-/* 60/30/10 dark + iOS glass + “Ferrari vibe” (sem laranja) */
-const C = {
-  bg: "#070A10",
-  line: "rgba(255,255,255,0.10)",
-  text: "#EAF0FF",
-  muted: "rgba(234,240,255,0.70)",
-  muted2: "rgba(234,240,255,0.55)",
-  shadow: "rgba(0,0,0,0.55)",
-  accent: "#D40000",
+/* --------------------- STYLE TOKENS (60/30/10) --------------------- */
+/**
+ * 60%: base/bg (claro neutro)
+ * 30%: surfaces (branco/translúcido)
+ * 10%: accent (vermelho)
+ */
+const T = {
+  bg: "#F4F6FA",             // 60
+  surface: "rgba(255,255,255,0.78)", // 30 (glass)
+  surfaceSolid: "#FFFFFF",
+  line: "rgba(15, 23, 42, 0.08)",
+  text: "#0B1220",
+  muted: "rgba(11,18,32,0.62)",
+  muted2: "rgba(11,18,32,0.48)",
+  shadow: "rgba(15,23,42,0.10)",
+  accent: "#D40000",         // 10 (Ferrari red)
   accent2: "#FF2A2A",
 };
 
-const fontFerrari = {
-  fontFamily: "Inter, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Arial",
-  letterSpacing: -0.4,
+const FerrariFont = {
+  fontFamily:
+    "Inter, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Arial",
 };
 
-const styles = {
+const S = {
   page: {
-    ...fontFerrari,
+    ...FerrariFont,
+    minHeight: "100vh",
+    background: `radial-gradient(1000px 520px at 20% 0%, rgba(212,0,0,0.10), transparent 60%),
+                 radial-gradient(900px 520px at 100% 10%, rgba(255,42,42,0.07), transparent 55%),
+                 ${T.bg}`,
+    color: T.text,
     padding: 18,
     paddingBottom: 120,
-    background: `radial-gradient(1200px 600px at 20% -10%, rgba(212,0,0,0.18), transparent 60%),
-                 radial-gradient(900px 500px at 110% 0%, rgba(255,42,42,0.10), transparent 55%),
-                 ${C.bg}`,
-    minHeight: "100vh",
-    color: C.text,
   },
 
-  hero: {
-    position: "relative",
-    borderRadius: 22,
-    padding: 18,
-    background: `linear-gradient(180deg, rgba(15,23,42,0.85), rgba(12,18,32,0.85))`,
-    border: `1px solid ${C.line}`,
-    boxShadow: `0 28px 90px ${C.shadow}`,
-    overflow: "hidden",
+  shell: {
+    display: "grid",
+    gap: 14,
+    maxWidth: 720,
+    margin: "0 auto",
   },
-  heroGlass: {
-    position: "absolute",
-    inset: 0,
-    background: "linear-gradient(135deg, rgba(255,255,255,0.06), rgba(255,255,255,0.02))",
+
+  headerCard: {
+    position: "relative",
+    borderRadius: 20, // mais retangular
+    overflow: "hidden",
+    background: T.surface,
+    border: `1px solid ${T.line}`,
+    boxShadow: `0 22px 60px ${T.shadow}`,
     backdropFilter: "blur(18px)",
     WebkitBackdropFilter: "blur(18px)",
+    padding: 14,
+  },
+  headerGlass: {
+    position: "absolute",
+    inset: 0,
+    background:
+      "linear-gradient(135deg, rgba(255,255,255,0.60), rgba(255,255,255,0.30))",
+    opacity: 0.35,
+    pointerEvents: "none",
+  },
+  headerAccent: {
+    position: "absolute",
+    left: 0,
+    top: 0,
+    bottom: 0,
+    width: 6,
+    background: `linear-gradient(180deg, ${T.accent2}, ${T.accent})`,
+    boxShadow: `0 0 0 1px rgba(212,0,0,0.08)`,
     pointerEvents: "none",
   },
 
-  profileRow: { position: "relative", display: "flex", gap: 14, alignItems: "center" },
-
-  avatarWrap: {
-    width: 78,
-    height: 78,
-    borderRadius: 18,
-    overflow: "hidden",
-    background: "rgba(255,255,255,0.06)",
-    display: "flex",
+  profileRow: {
+    position: "relative",
+    display: "grid",
+    gridTemplateColumns: "84px 1fr",
+    gap: 12,
     alignItems: "center",
-    justifyContent: "center",
+  },
+
+  avatarBtn: {
+    width: 84,
+    height: 84,
+    borderRadius: 18,
+    border: `1px solid ${T.line}`,
+    background: "rgba(255,255,255,0.65)",
+    overflow: "hidden",
     position: "relative",
     cursor: "pointer",
-    flexShrink: 0,
-    border: `1px solid ${C.line}`,
-    boxShadow: "0 18px 50px rgba(0,0,0,0.35)",
+    boxShadow: `0 14px 30px ${T.shadow}`,
+    padding: 0,
   },
-
-  avatarImg: { width: "100%", height: "100%", objectFit: "cover" },
-  avatarFallback: { fontSize: 28, fontWeight: 950, color: C.text },
-
-  badge: {
-    position: "absolute",
-    bottom: 6,
-    right: 6,
-    fontSize: 10,
-    background: "rgba(0,0,0,0.55)",
-    padding: "4px 8px",
-    borderRadius: 12,
-    fontWeight: 950,
-    border: `1px solid ${C.line}`,
-  },
-
-  info: { position: "relative", minWidth: 0 },
-  name: {
-    ...fontFerrari,
-    fontSize: 20,
+  avatarImg: { width: "100%", height: "100%", objectFit: "cover", display: "block" },
+  avatarFallback: {
+    width: "100%",
+    height: "100%",
+    display: "grid",
+    placeItems: "center",
     fontWeight: 1000,
+    fontSize: 28,
+    letterSpacing: -0.6,
+    color: T.text,
+  },
+  avatarBadge: {
+    position: "absolute",
+    bottom: 8,
+    left: 8,
+    padding: "6px 10px",
+    borderRadius: 14,
+    background: "rgba(255,255,255,0.78)",
+    border: `1px solid ${T.line}`,
+    fontWeight: 900,
+    fontSize: 11,
+    color: T.text,
+    letterSpacing: -0.2,
+  },
+
+  profileInfo: { minWidth: 0 },
+
+  name: {
+    fontWeight: 1100,
+    fontSize: 18,
     letterSpacing: -0.6,
     textTransform: "uppercase",
   },
-  email: { fontSize: 12, color: C.muted, wordBreak: "break-word", fontWeight: 800 },
+  email: {
+    marginTop: 2,
+    fontSize: 12,
+    color: T.muted,
+    fontWeight: 800,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  },
 
-  actions: { position: "relative", marginTop: 14, display: "grid", gap: 12 },
+  chipsRow: {
+    marginTop: 10,
+    display: "flex",
+    flexWrap: "wrap",
+    gap: 8,
+  },
+  chip: {
+    display: "inline-flex",
+    gap: 8,
+    alignItems: "center",
+    padding: "8px 10px",
+    borderRadius: 16,
+    background: "rgba(255,255,255,0.70)",
+    border: `1px solid ${T.line}`,
+    boxShadow: `0 10px 22px ${T.shadow}`,
+  },
+  chipK: { fontSize: 11, fontWeight: 950, color: T.muted2, letterSpacing: 0.2 },
+  chipV: { fontSize: 12, fontWeight: 1000, color: T.text, letterSpacing: -0.2 },
 
-  btnPrimary: {
-    padding: 14,
+  actionsRow: {
+    position: "relative",
+    marginTop: 12,
+    display: "grid",
+    gridTemplateColumns: "1fr 1fr 1fr",
+    gap: 10,
+  },
+
+  btnSoft: {
+    padding: "12px 12px",
     borderRadius: 18,
-    background: "rgba(255,255,255,0.06)",
-    color: C.text,
-    border: `1px solid ${C.line}`,
-    fontWeight: 950,
+    border: `1px solid ${T.line}`,
+    background: "rgba(255,255,255,0.70)",
+    color: T.text,
+    fontWeight: 1000,
     cursor: "pointer",
-    boxShadow: "0 18px 50px rgba(0,0,0,0.30)",
+    letterSpacing: -0.2,
   },
   btnAccent: {
-    padding: 14,
+    padding: "12px 12px",
     borderRadius: 18,
-    background: `linear-gradient(180deg, ${C.accent2}, ${C.accent})`,
-    color: "#0B0F17",
     border: "none",
+    background: `linear-gradient(180deg, ${T.accent2}, ${T.accent})`,
+    color: "#ffffff",
     fontWeight: 1100,
     cursor: "pointer",
     textTransform: "uppercase",
     letterSpacing: -0.2,
-    boxShadow: "0 22px 60px rgba(212,0,0,0.30)",
+    boxShadow: "0 14px 34px rgba(212,0,0,0.18)",
   },
   btnGhost: {
-    padding: 14,
+    padding: "12px 12px",
     borderRadius: 18,
+    border: `1px solid ${T.line}`,
     background: "transparent",
-    border: `1px solid ${C.line}`,
-    color: C.text,
-    fontWeight: 950,
+    color: T.text,
+    fontWeight: 1000,
     cursor: "pointer",
   },
 
   card: {
-    marginTop: 14,
-    borderRadius: 22,
-    padding: 16,
-    background: `linear-gradient(180deg, rgba(15,23,42,0.75), rgba(12,18,32,0.75))`,
-    border: `1px solid ${C.line}`,
-    boxShadow: "0 22px 70px rgba(0,0,0,0.40)",
-    backdropFilter: "blur(16px)",
-    WebkitBackdropFilter: "blur(16px)",
+    borderRadius: 20,
+    background: T.surface,
+    border: `1px solid ${T.line}`,
+    boxShadow: `0 22px 60px ${T.shadow}`,
+    backdropFilter: "blur(18px)",
+    WebkitBackdropFilter: "blur(18px)",
+    padding: 14,
   },
   cardTitle: {
-    ...fontFerrari,
     fontSize: 12,
     fontWeight: 1100,
     letterSpacing: 1.2,
-    color: C.muted,
+    color: T.muted,
     textTransform: "uppercase",
     marginBottom: 10,
   },
 
-  row: {
+  kvRow: {
     display: "flex",
-    justifyContent: "space-between",
     alignItems: "center",
+    justifyContent: "space-between",
     gap: 12,
     padding: "12px 0",
-    borderBottom: "1px solid rgba(255,255,255,0.08)",
+    borderBottom: `1px solid rgba(15,23,42,0.06)`,
   },
-  rowLabel: { fontWeight: 950, color: C.text, opacity: 0.95 },
-  rowValue: {
+  kvKey: { fontWeight: 950, color: T.text },
+  kvVal: {
     fontWeight: 900,
-    color: C.muted,
+    color: T.muted,
     textAlign: "right",
     maxWidth: "60%",
     overflow: "hidden",
@@ -387,93 +578,80 @@ const styles = {
     whiteSpace: "nowrap",
   },
 
+  label: { fontSize: 12, fontWeight: 950, color: T.muted2, marginBottom: 6 },
   grid2: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 12 },
-  miniLabel: { fontSize: 12, fontWeight: 900, color: C.muted2, marginBottom: 6 },
 
   input: {
     width: "100%",
     padding: 12,
-    borderRadius: 16,
-    border: `1px solid ${C.line}`,
+    borderRadius: 18,
+    border: `1px solid ${T.line}`,
     outline: "none",
-    background: "rgba(0,0,0,0.30)",
-    color: C.text,
-    fontWeight: 900,
+    background: "rgba(255,255,255,0.80)",
+    color: T.text,
+    fontWeight: 950,
+    boxShadow: `0 10px 22px ${T.shadow}`,
   },
 
   select: {
     padding: "10px 12px",
-    borderRadius: 16,
-    border: `1px solid ${C.line}`,
+    borderRadius: 18,
+    border: `1px solid ${T.line}`,
     outline: "none",
-    background: "rgba(0,0,0,0.30)",
-    color: C.text,
-    fontWeight: 900,
+    background: "rgba(255,255,255,0.80)",
+    color: T.text,
+    fontWeight: 950,
+    boxShadow: `0 10px 22px ${T.shadow}`,
   },
 
-  hint: { marginTop: 10, fontSize: 12, color: C.muted, fontWeight: 800, lineHeight: 1.35 },
+  note: { marginTop: 10, fontSize: 12, color: T.muted, fontWeight: 800 },
 
-  modalOverlay: {
+  overlay: {
     position: "fixed",
     inset: 0,
-    background: "rgba(0,0,0,0.62)",
+    background: "rgba(11,18,32,0.20)",
+    backdropFilter: "blur(12px)",
+    WebkitBackdropFilter: "blur(12px)",
     display: "grid",
-    placeItems: "center",
-    zIndex: 999,
-    padding: 18,
+    placeItems: "end center",
+    padding: 14,
+    zIndex: 1000,
   },
-  modal: {
-    width: "min(520px, 100%)",
+  sheet: {
+    width: "min(720px, 100%)",
     borderRadius: 22,
-    padding: 18,
-    background: `linear-gradient(180deg, rgba(15,23,42,0.92), rgba(12,18,32,0.92))`,
-    border: `1px solid ${C.line}`,
-    boxShadow: "0 34px 110px rgba(0,0,0,0.70)",
-    backdropFilter: "blur(18px)",
-    WebkitBackdropFilter: "blur(18px)",
-    color: C.text,
+    background: "rgba(255,255,255,0.92)",
+    border: `1px solid ${T.line}`,
+    boxShadow: "0 30px 90px rgba(15,23,42,0.18)",
+    padding: 14,
   },
-  modalTitle: {
-    ...fontFerrari,
-    fontSize: 14,
+  sheetHandle: {
+    width: 56,
+    height: 5,
+    borderRadius: 999,
+    background: "rgba(15,23,42,0.16)",
+    margin: "0 auto 10px",
+  },
+  sheetTitle: {
+    fontSize: 12,
     fontWeight: 1100,
     letterSpacing: 1.2,
     textTransform: "uppercase",
+    color: T.text,
   },
-  modalSub: { marginTop: 6, fontSize: 13, color: C.muted, lineHeight: 1.45, fontWeight: 800 },
 
-  formGrid: { marginTop: 14, display: "flex", flexDirection: "column", gap: 10 },
+  form: { marginTop: 12, display: "grid", gap: 10 },
   row2: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 },
 
-  modalMsg: {
-    marginTop: 6,
+  msg: {
     padding: "10px 12px",
-    borderRadius: 16,
-    background: "rgba(212,0,0,0.12)",
-    border: "1px solid rgba(212,0,0,0.22)",
-    color: C.text,
+    borderRadius: 18,
+    background: "rgba(212,0,0,0.10)",
+    border: "1px solid rgba(212,0,0,0.18)",
+    color: T.text,
     fontSize: 13,
     fontWeight: 900,
   },
 
-  modalActions: { marginTop: 8, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 },
-  modalCancel: {
-    padding: 14,
-    borderRadius: 18,
-    background: "rgba(255,255,255,0.06)",
-    border: `1px solid ${C.line}`,
-    color: C.text,
-    fontWeight: 950,
-    cursor: "pointer",
-  },
-  modalSave: {
-    padding: 14,
-    borderRadius: 18,
-    background: `linear-gradient(180deg, ${C.accent2}, ${C.accent})`,
-    border: "none",
-    color: "#0B0F17",
-    fontWeight: 1100,
-    cursor: "pointer",
-    textTransform: "uppercase",
-  },
+  sheetActions: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 4 },
 };
