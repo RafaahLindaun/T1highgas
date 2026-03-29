@@ -1,15 +1,14 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { useNavigate } from "react-router-dom";
 import { useEco } from "../context/EcoContext";
 
-const DEFAULT_CENTER = { lat: -23.5505, lon: -46.6333 };
-const TANK_KEY = "@EcoRoute:Tank:v1";
+/* ---------- THEME ---------- */
+const ORANGE = "#FF6A00";
+const BG = "#0b0f17";
+const CARD = "rgba(255,255,255,0.92)";
+const BORDER = "rgba(15,23,42,0.10)";
 
-// “vantagem” (cru): economia estimada vs “rota comum” (fator)
-const BASELINE_COST_MULTIPLIER = 1.08;
-
-// --- Leaflet CDN (sem depender de npm) ---
+/* ---------- Leaflet CDN ---------- */
 function loadLeaflet() {
   if (window.L) return Promise.resolve(window.L);
 
@@ -48,75 +47,154 @@ function loadLeaflet() {
   });
 }
 
+/* ---------- Helpers ---------- */
 function n(v) {
   const num = Number(String(v ?? "").replace(",", "."));
   return Number.isFinite(num) ? num : null;
 }
-
-function km(m) {
-  return (m / 1000).toFixed(m > 9999 ? 0 : 1);
-}
-
-function mins(s) {
-  return Math.round(s / 60);
-}
-
 function clamp(x, a, b) {
   return Math.max(a, Math.min(b, x));
 }
+function km(m) {
+  return m / 1000;
+}
+function mins(s) {
+  return Math.round(s / 60);
+}
+function haversineKm(lat1, lon1, lat2, lon2) {
+  const R = 6371;
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLon = ((lon2 - lon1) * Math.PI) / 180;
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos((lat1 * Math.PI) / 180) *
+      Math.cos((lat2 * Math.PI) / 180) *
+      Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
 
-function readTank() {
-  try {
-    const raw = localStorage.getItem(TANK_KEY);
-    if (!raw) return { capacityL: 50, levelL: 50 };
-    const t = JSON.parse(raw);
-    const cap = n(t.capacityL) ?? 50;
-    const lvl = n(t.levelL) ?? cap;
-    return { capacityL: cap, levelL: clamp(lvl, 0, cap) };
-  } catch {
-    return { capacityL: 50, levelL: 50 };
+/* ---------- Optional: Ascent estimate (best-effort) ---------- */
+/* Nota: isso usa OpenTopoData (público). Se falhar, segue sem subida. */
+async function estimateAscentM(samplePoints) {
+  const pts = samplePoints.slice(0, 40);
+  const locations = pts.map((p) => `${p.lat},${p.lon}`).join("|");
+  const url = `https://api.opentopodata.org/v1/srtm90m?locations=${encodeURIComponent(locations)}`;
+
+  const res = await fetch(url);
+  const data = await res.json();
+  const results = data?.results;
+  if (!Array.isArray(results) || results.length < 2) return null;
+
+  let ascent = 0;
+  for (let i = 1; i < results.length; i++) {
+    const prev = Number(results[i - 1]?.elevation);
+    const cur = Number(results[i]?.elevation);
+    if (Number.isFinite(prev) && Number.isFinite(cur)) {
+      const diff = cur - prev;
+      if (diff > 0) ascent += diff;
+    }
   }
+  return ascent;
 }
 
-function writeTank(tank) {
-  try {
-    localStorage.setItem(TANK_KEY, JSON.stringify(tank));
-  } catch {}
+function sampleRoutePoints(coords, max = 30) {
+  if (!coords?.length) return [];
+  const step = Math.max(1, Math.floor(coords.length / max));
+  const out = [];
+  for (let i = 0; i < coords.length; i += step) {
+    const [lon, lat] = coords[i];
+    out.push({ lat, lon });
+  }
+  const last = coords[coords.length - 1];
+  if (last) out.push({ lat: last[1], lon: last[0] });
+  return out.slice(0, max);
 }
 
+/* ---------- POIs: fuel stations (Overpass) ---------- */
+async function fetchNearbyFuelStations(lat, lon) {
+  const q = `
+[out:json][timeout:10];
+(
+  node["amenity"="fuel"](around:2500,${lat},${lon});
+  way["amenity"="fuel"](around:2500,${lat},${lon});
+  relation["amenity"="fuel"](around:2500,${lat},${lon});
+);
+out center 25;`;
+
+  const res = await fetch("https://overpass-api.de/api/interpreter", {
+    method: "POST",
+    headers: { "Content-Type": "text/plain;charset=UTF-8" },
+    body: q,
+  });
+  const data = await res.json();
+  const els = data?.elements || [];
+  return els
+    .map((el) => {
+      const lat2 = el.lat ?? el.center?.lat;
+      const lon2 = el.lon ?? el.center?.lon;
+      if (!Number.isFinite(lat2) || !Number.isFinite(lon2)) return null;
+      const name = el.tags?.name || "Posto";
+      return { id: String(el.id), lat: lat2, lon: lon2, label: name, kind: "fuel" };
+    })
+    .filter(Boolean);
+}
+
+/* ---------- Geocode ---------- */
+async function geocodeOne(q) {
+  const url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(q)}`;
+  const res = await fetch(url);
+  const data = await res.json();
+  const first = data?.[0];
+  if (!first) return null;
+  return { lat: Number(first.lat), lon: Number(first.lon), label: first.display_name || q };
+}
+
+/* ---------- Main ---------- */
 export default function MapaGPS() {
-  const nav = useNavigate();
-  const { vehicle, setDestination, setRoute, destination, route, addHistory } = useEco();
+  const {
+    vehicle,
+    tank,
+    routeMode,
+    setRouteMode,
+    setLocation,
+    destination,
+    setDestination,
+    route,
+    setRoute,
+    routeOptions,
+    setRouteOptions,
+    consumeLiters,
+    addHistory,
+    pois,
+    setPois,
+  } = useEco();
 
   const mapDivRef = useRef(null);
-  const leafletRef = useRef({
+  const refs = useRef({
     L: null,
     map: null,
     userMarker: null,
     destMarker: null,
     routeLayer: null,
+    altLayer: null,
+    poiLayer: null,
     watchId: null,
     lastGps: null,
   });
 
-  const [ready, setReady] = useState(false);
-  const [busy, setBusy] = useState({ map: true, route: false });
-
+  const [busy, setBusy] = useState({ map: true, route: false, radar: false });
+  const [searchOpen, setSearchOpen] = useState(false);
   const [search, setSearch] = useState("");
-  const [gps, setGps] = useState({ lat: null, lon: null });
 
-  const [tank, setTank] = useState(() => readTank());
-  const [showLitersToast, setShowLitersToast] = useState(false);
+  const [tripActive, setTripActive] = useState(false);
+  const [tripKm, setTripKm] = useState(0);
+  const [tripUsedL, setTripUsedL] = useState(0);
 
   const [sheetOpen, setSheetOpen] = useState(false);
-  const [tripActive, setTripActive] = useState(false);
+  const [uiWake, setUiWake] = useState(true);
 
-  // double click detector
-  const clickTimer = useRef(null);
-
-  // inject a tiny CSS for a “chamativo” pulse
   useEffect(() => {
-    const id = "eco-ui-css";
+    const id = "ecoPulseCss";
     if (document.getElementById(id)) return;
     const style = document.createElement("style");
     style.id = id;
@@ -130,12 +208,7 @@ export default function MapaGPS() {
     document.head.appendChild(style);
   }, []);
 
-  // persist tank
-  useEffect(() => {
-    writeTank(tank);
-  }, [tank]);
-
-  // init map + gps
+  /* ---------- Init map + GPS ---------- */
   useEffect(() => {
     let mounted = true;
 
@@ -144,7 +217,7 @@ export default function MapaGPS() {
         const L = await loadLeaflet();
         if (!mounted) return;
 
-        leafletRef.current.L = L;
+        refs.current.L = L;
 
         // evita “already initialized” em hot reload
         if (mapDivRef.current && mapDivRef.current._leaflet_id) {
@@ -154,83 +227,75 @@ export default function MapaGPS() {
         const map = L.map(mapDivRef.current, {
           zoomControl: false,
           attributionControl: false,
-        }).setView([DEFAULT_CENTER.lat, DEFAULT_CENTER.lon], 13);
+        }).setView([-23.55, -46.63], 13);
 
-        L.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png", {
-          maxZoom: 20,
-        }).addTo(map);
+        L.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png", { maxZoom: 20 }).addTo(map);
 
-        // hillshade leve
-        L.tileLayer("https://tiles.wmflabs.org/hillshading/{z}/{x}/{y}.png", {
-          opacity: 0.18,
-          maxZoom: 18,
-        }).addTo(map);
+        // Hillshade leve (visual)
+        L.tileLayer("https://tiles.wmflabs.org/hillshading/{z}/{x}/{y}.png", { opacity: 0.18, maxZoom: 18 }).addTo(map);
+
+        map.on("click", (e) => {
+          const { lat, lng } = e.latlng;
+          setDestination({ lat, lon: lng, label: "Destino (toque no mapa)" });
+          setUiWake(true);
+          setTimeout(() => setUiWake(false), 4500);
+        });
 
         const userIcon = L.divIcon({
           className: "eco-user",
-          html: `<div style="
-            width:14px;height:14px;border-radius:50%;
-            background:#2563eb;border:3px solid #fff;
-            box-shadow:0 10px 18px rgba(15,23,42,.18);
-          "></div>`,
+          html: `<div style="width:14px;height:14px;border-radius:50%;background:${ORANGE};border:3px solid #fff;box-shadow:0 12px 22px rgba(15,23,42,.22);"></div>`,
           iconSize: [20, 20],
           iconAnchor: [10, 10],
         });
 
-        const userMarker = L.marker([DEFAULT_CENTER.lat, DEFAULT_CENTER.lon], { icon: userIcon }).addTo(map);
+        const userMarker = L.marker([-23.55, -46.63], { icon: userIcon }).addTo(map);
 
-        map.on("click", (e) => {
-          const { lat, lng } = e.latlng;
-          const dest = { lat, lon: lng, label: "Destino (toque no mapa)" };
-          setDestination(dest);
-        });
-
-        leafletRef.current.map = map;
-        leafletRef.current.userMarker = userMarker;
+        refs.current.map = map;
+        refs.current.userMarker = userMarker;
 
         setTimeout(() => map.invalidateSize(), 250);
 
-        // GPS live
+        // GPS watch
         if ("geolocation" in navigator) {
           const watchId = navigator.geolocation.watchPosition(
             (pos) => {
-              const { latitude, longitude } = pos.coords;
+              const { latitude, longitude, accuracy } = pos.coords;
+              const now = new Date().toISOString();
 
-              setGps({ lat: latitude, lon: longitude });
+              setLocation({ lat: latitude, lon: longitude, accuracy, updatedAt: now });
 
-              const ll = [latitude, longitude];
-              userMarker.setLatLng(ll);
-              map.panTo(ll, { animate: true, duration: 0.5 });
+              userMarker.setLatLng([latitude, longitude]);
+              map.panTo([latitude, longitude], { animate: true, duration: 0.45 });
 
-              // consumo ao vivo (cru): se tripActive, debita pelo deslocamento real
               if (tripActive) {
-                const prev = leafletRef.current.lastGps;
-                leafletRef.current.lastGps = { lat: latitude, lon: longitude };
+                const prev = refs.current.lastGps;
+                refs.current.lastGps = { lat: latitude, lon: longitude };
 
                 if (prev) {
-                  const dKm = haversineKm(prev.lat, prev.lon, latitude, longitude);
-                  const cons = n(vehicle?.consumption) ?? 10; // fallback 10 km/L
-                  const usedL = dKm / cons;
-                  if (usedL > 0) {
-                    setTank((t) => {
-                      const next = { ...t, levelL: clamp(t.levelL - usedL, 0, t.capacityL) };
-                      return next;
-                    });
+                  const d = haversineKm(prev.lat, prev.lon, latitude, longitude);
+                  if (d > 0.002) {
+                    setTripKm((k) => k + d);
+
+                    const cons = n(vehicle?.consumption);
+                    if (cons && cons > 0) {
+                      const used = d / cons;
+                      setTripUsedL((u) => u + used);
+                      consumeLiters(used);
+                    }
                   }
                 }
               } else {
-                leafletRef.current.lastGps = { lat: latitude, lon: longitude };
+                refs.current.lastGps = { lat: latitude, lon: longitude };
               }
             },
             (err) => console.error("GPS erro:", err),
             { enableHighAccuracy: true, timeout: 12000, maximumAge: 0 }
           );
 
-          leafletRef.current.watchId = watchId;
+          refs.current.watchId = watchId;
         }
 
         setBusy((s) => ({ ...s, map: false }));
-        setReady(true);
       } catch (e) {
         console.error(e);
         setBusy((s) => ({ ...s, map: false }));
@@ -239,280 +304,365 @@ export default function MapaGPS() {
 
     return () => {
       mounted = false;
-      const { map, watchId } = leafletRef.current;
-
+      const { map, watchId } = refs.current;
       if (watchId != null && "geolocation" in navigator) navigator.geolocation.clearWatch(watchId);
       if (map) {
         map.off();
         map.remove();
       }
-      leafletRef.current.map = null;
+      refs.current.map = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tripActive, vehicle?.consumption]);
 
-  // quando destination mudar (via IA ou clique/busca) -> marca destino e traça rota
+  /* ---------- Render POIs ---------- */
   useEffect(() => {
-    const { L, map } = leafletRef.current;
-    if (!L || !map || !destination) return;
+    const { L, map } = refs.current;
+    if (!L || !map) return;
 
-    // dest marker
-    if (leafletRef.current.destMarker) {
-      map.removeLayer(leafletRef.current.destMarker);
-      leafletRef.current.destMarker = null;
+    if (refs.current.poiLayer) {
+      map.removeLayer(refs.current.poiLayer);
+      refs.current.poiLayer = null;
+    }
+
+    if (!pois?.length) return;
+
+    const layer = L.layerGroup();
+    pois.forEach((p) => {
+      const icon = L.divIcon({
+        className: "eco-poi",
+        html: `<div style="width:12px;height:12px;border-radius:50%;background:#111;border:3px solid ${ORANGE};box-shadow:0 10px 18px rgba(15,23,42,.20);"></div>`,
+        iconSize: [18, 18],
+        iconAnchor: [9, 9],
+      });
+      L.marker([p.lat, p.lon], { icon }).addTo(layer).bindPopup(p.label);
+    });
+
+    layer.addTo(map);
+    refs.current.poiLayer = layer;
+  }, [pois]);
+
+  /* ---------- When destination changes -> set marker + route ---------- */
+  useEffect(() => {
+    if (!destination) return;
+    const { L, map } = refs.current;
+    if (!L || !map) return;
+
+    if (refs.current.destMarker) {
+      map.removeLayer(refs.current.destMarker);
+      refs.current.destMarker = null;
     }
 
     const destIcon = L.divIcon({
       className: "eco-dest",
-      html: `<div style="
-        width:14px;height:14px;border-radius:50%;
-        background:#ef4444;border:3px solid #fff;
-        box-shadow:0 10px 18px rgba(15,23,42,.18);
-      "></div>`,
+      html: `<div style="width:14px;height:14px;border-radius:50%;background:#111;border:3px solid ${ORANGE};box-shadow:0 12px 22px rgba(15,23,42,.22);"></div>`,
       iconSize: [20, 20],
       iconAnchor: [10, 10],
     });
 
-    leafletRef.current.destMarker = L.marker([destination.lat, destination.lon], { icon: destIcon })
+    refs.current.destMarker = L.marker([destination.lat, destination.lon], { icon: destIcon })
       .addTo(map)
-      .bindPopup(destination.label || "Destino");
+      .bindPopup(destination.label);
 
-    map.flyTo([destination.lat, destination.lon], 15, { duration: 0.6 });
-
-    // rota se já tem GPS
-    if (gps.lat != null && gps.lon != null) {
-      buildRoute({ lat: gps.lat, lon: gps.lon }, destination).catch(console.error);
+    const loc = refs.current.lastGps;
+    if (loc?.lat != null && loc?.lon != null) {
+      buildRoutes({ lat: loc.lat, lon: loc.lon }, destination).catch(console.error);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [destination, gps.lat, gps.lon]);
 
-  async function buildRoute(from, to) {
-    const { L, map } = leafletRef.current;
+    setSheetOpen(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [destination]);
+
+  function computeEstimates(distanceM) {
+    const cons = n(vehicle?.consumption);
+    const price = n(vehicle?.fuelPrice);
+
+    if (!cons || cons <= 0) return { liters: null, cost: null };
+    const liters = km(distanceM) / cons;
+
+    if (!price || price <= 0) return { liters, cost: null };
+    return { liters, cost: liters * price };
+  }
+
+  async function buildRoutes(from, to) {
+    const { L, map } = refs.current;
     if (!L || !map) return;
 
     setBusy((s) => ({ ...s, route: true }));
 
-    // limpa rota anterior
-    if (leafletRef.current.routeLayer) {
-      map.removeLayer(leafletRef.current.routeLayer);
-      leafletRef.current.routeLayer = null;
+    if (refs.current.routeLayer) {
+      map.removeLayer(refs.current.routeLayer);
+      refs.current.routeLayer = null;
+    }
+    if (refs.current.altLayer) {
+      map.removeLayer(refs.current.altLayer);
+      refs.current.altLayer = null;
     }
 
-    // OSRM público (teste rápido)
-    const url = `https://router.project-osrm.org/route/v1/driving/${from.lon},${from.lat};${to.lon},${to.lat}?overview=full&geometries=geojson`;
+    const url = `https://router.project-osrm.org/route/v1/driving/${from.lon},${from.lat};${to.lon},${to.lat}?overview=full&geometries=geojson&alternatives=true`;
     const res = await fetch(url);
     const data = await res.json();
 
-    const r = data?.routes?.[0];
-    if (!r?.geometry?.coordinates?.length) {
+    const routes = Array.isArray(data?.routes) ? data.routes.slice(0, 2) : [];
+    if (!routes.length) {
       setBusy((s) => ({ ...s, route: false }));
       return;
     }
 
-    const latlngs = r.geometry.coordinates.map(([lon, lat]) => [lat, lon]);
+    // cria opções base
+    let opts = routes.map((r, idx) => {
+      const est = computeEstimates(r.distance);
+      return {
+        id: `r${idx}`,
+        from,
+        to,
+        distanceM: r.distance,
+        durationS: r.duration,
+        litersEst: est.liters ?? undefined,
+        costEst: est.cost ?? undefined,
+        mode: routeMode,
+        createdAt: new Date().toISOString(),
+        label: to.label,
+      };
+    });
 
-    const line = L.polyline(latlngs, {
-      weight: 6,
-      opacity: 0.92,
-    }).addTo(map);
+    // tenta enriquecer com subida (não obrigatório)
+    if (routeMode !== "fast") {
+      try {
+        const enriched = await Promise.all(
+          routes.map(async (r, idx) => {
+            const coords = r.geometry?.coordinates || [];
+            const samples = sampleRoutePoints(coords, 30);
+            const ascent = await estimateAscentM(samples);
+            return { idx, ascent };
+          })
+        );
+        enriched.forEach(({ idx, ascent }) => {
+          if (ascent != null) opts[idx].ascentM = ascent;
+        });
+      } catch {}
+    }
 
-    leafletRef.current.routeLayer = line;
+    // score eco/balanced/fast
+    opts = opts.map((o) => {
+      const cons = n(vehicle?.consumption) || 10;
+      const liters = o.litersEst ?? km(o.distanceM) / cons;
+
+      const ascentPenalty = (o.ascentM ?? 0) * 0.00008; // ajuste fino depois
+      const hours = o.durationS / 3600;
+
+      const score =
+        routeMode === "fast"
+          ? hours
+          : routeMode === "balanced"
+          ? liters * 0.75 + ascentPenalty + hours * 0.25
+          : liters + ascentPenalty;
+
+      return { ...o, score };
+    });
+
+    const best =
+      routeMode === "fast"
+        ? opts.slice().sort((a, b) => a.durationS - b.durationS)[0]
+        : opts.slice().sort((a, b) => (a.score ?? 0) - (b.score ?? 0))[0];
+
+    setRouteOptions(opts);
+    setRoute(best);
+
+    // desenha rota melhor (laranja) e alternativa (preta)
+    const bestIdx = opts.findIndex((o) => o.id === best.id);
+    const bestCoords = routes[bestIdx]?.geometry?.coordinates || [];
+    const bestLatLngs = bestCoords.map(([lon, lat]) => [lat, lon]);
+
+    const line = L.polyline(bestLatLngs, { weight: 6, opacity: 0.92, color: ORANGE }).addTo(map);
+    refs.current.routeLayer = line;
     map.fitBounds(line.getBounds(), { padding: [30, 30] });
 
-    const payload = {
-      from,
-      to,
-      distanceM: r.distance,
-      durationS: r.duration,
-      label: to.label,
-      createdAt: new Date().toISOString(),
-    };
-
-    setRoute(payload);
-    setSheetOpen(true);
+    if (routes.length > 1) {
+      const altIdx = bestIdx === 0 ? 1 : 0;
+      const altCoords = routes[altIdx]?.geometry?.coordinates || [];
+      const altLatLngs = altCoords.map(([lon, lat]) => [lat, lon]);
+      const alt = L.polyline(altLatLngs, { weight: 4, opacity: 0.45, color: "#111" }).addTo(map);
+      refs.current.altLayer = alt;
+    }
 
     setBusy((s) => ({ ...s, route: false }));
   }
 
-  async function handleSearch(e) {
+  async function onRadar() {
+    const loc = refs.current.lastGps;
+    if (!loc) return;
+    setBusy((s) => ({ ...s, radar: true }));
+    try {
+      const list = await fetchNearbyFuelStations(loc.lat, loc.lon);
+      setPois(list);
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setBusy((s) => ({ ...s, radar: false }));
+    }
+  }
+
+  function toggleMode() {
+    const next = routeMode === "eco" ? "balanced" : routeMode === "balanced" ? "fast" : "eco";
+    setRouteMode(next);
+
+    const loc = refs.current.lastGps;
+    if (destination && loc) buildRoutes({ lat: loc.lat, lon: loc.lon }, destination).catch(console.error);
+  }
+
+  function onSaveRoute() {
+    if (!route) return;
+    addHistory(route);
+  }
+
+  async function onSearchSubmit(e) {
     e.preventDefault();
     const q = search.trim();
     if (!q) return;
-
+    setBusy((s) => ({ ...s, route: true }));
     try {
-      setBusy((s) => ({ ...s, route: true }));
-      const url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(q)}`;
-      const res = await fetch(url);
-      const data = await res.json();
-      const first = data?.[0];
-      if (!first) return;
-
-      setDestination({
-        lat: Number(first.lat),
-        lon: Number(first.lon),
-        label: first.display_name || q,
-      });
-    } catch (err) {
-      console.error(err);
+      const found = await geocodeOne(q);
+      if (found) setDestination(found);
+      setSearchOpen(false);
+      setUiWake(true);
+      setTimeout(() => setUiWake(false), 4500);
     } finally {
       setBusy((s) => ({ ...s, route: false }));
     }
   }
 
-  function recenter() {
-    const { map } = leafletRef.current;
-    if (!map) return;
-    if (gps.lat == null || gps.lon == null) return;
-    map.flyTo([gps.lat, gps.lon], 16, { duration: 0.6 });
-  }
-
-  // --- Fuel numbers for the bottom sheet ---
-  const fuelCalc = useMemo(() => {
+  const bottom = useMemo(() => {
     if (!route) return null;
 
-    const cons = n(vehicle?.consumption);
-    const price = n(vehicle?.fuelPrice);
+    const liters = route.litersEst ?? null;
+    const cost = route.costEst ?? null;
 
-    const distKm = route.distanceM / 1000;
-
-    if (!cons || cons <= 0) {
-      return { distKm, liters: null, cost: null, advantage: null, needsVehicle: true };
+    // “vantagem” v1: compara com outra rota (se tiver)
+    let advantage = null;
+    if (routeOptions?.length >= 2) {
+      const other = routeOptions.find((o) => o.id !== route.id);
+      if (other?.costEst != null && cost != null) advantage = other.costEst - cost;
+    } else if (cost != null) {
+      advantage = cost * 0.08;
     }
 
-    const liters = distKm / cons;
+    return { liters, cost, advantage };
+  }, [route, routeOptions]);
 
-    if (!price || price <= 0) {
-      return { distKm, liters, cost: null, advantage: null, needsVehicle: true };
-    }
-
-    const cost = liters * price;
-    const baselineCost = cost * BASELINE_COST_MULTIPLIER;
-    const advantage = baselineCost - cost; // economia
-
-    return { distKm, liters, cost, advantage, needsVehicle: false };
-  }, [route, vehicle?.consumption, vehicle?.fuelPrice]);
-
-  function onTankClick() {
-    if (clickTimer.current) {
-      // double click
-      clearTimeout(clickTimer.current);
-      clickTimer.current = null;
-      nav("/abastecimento");
-      return;
-    }
-
-    clickTimer.current = setTimeout(() => {
-      clickTimer.current = null;
-      setShowLitersToast(true);
-      setTimeout(() => setShowLitersToast(false), 1600);
-    }, 240);
-  }
-
-  function applyEstimatedConsumption() {
-    if (!fuelCalc?.liters) return;
-    setTank((t) => ({ ...t, levelL: clamp(t.levelL - fuelCalc.liters, 0, t.capacityL) }));
-    if (route) addHistory(route);
-  }
-
-  const percent = tank.capacityL > 0 ? clamp(tank.levelL / tank.capacityL, 0, 1) : 0;
+  const fuelOk = useMemo(() => {
+    if (!bottom?.liters) return null;
+    return tank.levelL >= bottom.liters;
+  }, [tank.levelL, bottom?.liters]);
 
   return (
     <div style={styles.wrap}>
-      {/* Search bar */}
-      <div style={styles.topBar}>
-        <form onSubmit={handleSearch} style={styles.searchForm}>
-          <input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Para onde vamos?"
-            style={styles.searchInput}
-          />
-          <button type="submit" style={styles.searchBtn}>
-            {busy.route ? "..." : "🔍"}
-          </button>
-        </form>
-      </div>
+      <div ref={mapDivRef} style={styles.map} />
 
-      {/* Map */}
-      <div ref={mapDivRef} style={styles.mapCanvas} />
+      {/* TOP TOOLS (abre e some) */}
+      <AnimatePresence>
+        {uiWake && (
+          <motion.div
+            initial={{ y: -120, opacity: 0, scale: 0.92 }}
+            animate={{ y: 14, opacity: 1, scale: 1 }}
+            exit={{ y: -120, opacity: 0, scale: 0.92 }}
+            transition={{ type: "spring", stiffness: 320, damping: 28 }}
+            style={styles.topIsland}
+          >
+            <div style={styles.tools}>
+              <button onClick={toggleMode} style={styles.toolBtn}>
+                ECO <span style={styles.toolMini}>{routeMode.toUpperCase()}</span>
+              </button>
+              <button onClick={() => setSearchOpen(true)} style={styles.toolBtn}>
+                ROUTE
+              </button>
+              <button onClick={onRadar} style={styles.toolBtn}>
+                {busy.radar ? "..." : "RADAR"}
+              </button>
+              <button onClick={onSaveRoute} style={styles.toolBtn}>
+                SAVE
+              </button>
+              <button
+                onClick={() => {
+                  setTripActive((v) => {
+                    const next = !v;
+                    if (next) {
+                      setTripKm(0);
+                      setTripUsedL(0);
+                    } else {
+                      if (route) addHistory({ ...route });
+                    }
+                    return next;
+                  });
+                }}
+                style={{
+                  ...styles.toolBtn,
+                  borderColor: tripActive ? ORANGE : "rgba(255,255,255,0.14)",
+                }}
+              >
+                {tripActive ? "STOP" : "GO"}
+              </button>
+              <button
+                onClick={() => {
+                  setUiWake(false);
+                }}
+                style={{
+                  ...styles.toolBtn,
+                  background: "rgba(255,255,255,0.03)",
+                }}
+              >
+                ✕
+              </button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
-      {/* Loading */}
-      {!ready && (
-        <div style={styles.loading}>
-          <div style={styles.loadingCard}>
-            <b>Carregando mapa…</b>
-            <div style={{ marginTop: 6, opacity: 0.75 }}>se demorar, atualize a página</div>
-          </div>
-        </div>
+      {/* QUICK WAKE BUTTON */}
+      {!uiWake && (
+        <button
+          onClick={() => {
+            setUiWake(true);
+            setTimeout(() => setUiWake(false), 4500);
+          }}
+          style={styles.wakeBtn}
+        >
+          +
+        </button>
       )}
 
-      {/* Fabs (direita) */}
-      <div style={styles.fabs}>
-        <button style={styles.fab} onClick={recenter} title="Centralizar GPS">
-          📍
-        </button>
-      </div>
-
-      {/* Fuel gauge (esquerda) */}
-      <div style={styles.tankWrap} onClick={onTankClick}>
-        <div style={styles.tankLabelTop}>F</div>
-
-        <div style={styles.dotsCol}>
-          {Array.from({ length: 14 }).map((_, i) => {
-            // i=0 topo, i=13 base
-            const levelIndex = 13 - i;
-            const filledDots = Math.round(percent * 14);
-            const filled = levelIndex < filledDots;
-
-            return (
-              <div
-                key={i}
-                style={{
-                  ...styles.dot,
-                  opacity: filled ? 1 : 0.22,
-                }}
-              />
-            );
-          })}
-        </div>
-
-        <div style={styles.tankLabelBottom}>E</div>
-
-        <AnimatePresence>
-          {showLitersToast && (
-            <motion.div
-              initial={{ opacity: 0, x: -8, scale: 0.98 }}
-              animate={{ opacity: 1, x: 0, scale: 1 }}
-              exit={{ opacity: 0, x: -8, scale: 0.98 }}
-              transition={{ duration: 0.16 }}
-              style={styles.litersToast}
-            >
-              <b style={{ fontSize: 14 }}>{tank.levelL.toFixed(1)} L</b>
-              <div style={{ fontSize: 11, opacity: 0.75 }}>
-                {Math.round(percent * 100)}%
-              </div>
+      {/* SEARCH MODAL */}
+      <AnimatePresence>
+        {searchOpen && (
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} style={styles.modalOverlay} onClick={() => setSearchOpen(false)}>
+            <motion.div initial={{ y: 18, scale: 0.98 }} animate={{ y: 0, scale: 1 }} exit={{ y: 18, scale: 0.98 }} style={styles.modal} onClick={(e) => e.stopPropagation()}>
+              <div style={{ fontWeight: 1000, marginBottom: 10 }}>Destino</div>
+              <form onSubmit={onSearchSubmit} style={{ display: "flex", gap: 10 }}>
+                <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Ex: Av Paulista" style={styles.input} />
+                <button type="submit" style={styles.goBtn}>
+                  {busy.route ? "..." : "Ir"}
+                </button>
+              </form>
             </motion.div>
-          )}
-        </AnimatePresence>
-      </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
-      {/* Bottom pop-up (chamativo) */}
+      {/* BOTTOM POPUP */}
       <AnimatePresence>
         {sheetOpen && route && (
           <motion.div
-            initial={{ y: 260, opacity: 0 }}
+            initial={{ y: 240, opacity: 0 }}
             animate={{ y: 0, opacity: 1 }}
-            exit={{ y: 260, opacity: 0 }}
+            exit={{ y: 240, opacity: 0 }}
             transition={{ type: "spring", stiffness: 260, damping: 28 }}
             style={styles.sheet}
           >
-            <div style={styles.sheetHandle} />
-
-            <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
               <div style={{ minWidth: 0 }}>
-                <div style={styles.sheetTitle}>Estimativa</div>
-                <div style={styles.sheetSub}>
-                  {route.to?.label ? truncate(route.to.label, 52) : "Destino"}
+                <div style={{ fontSize: 12, fontWeight: 1000, color: "#64748b" }}>ECO RESULT</div>
+                <div style={styles.destLine}>
+                  {destination?.label || "Destino"}
                 </div>
               </div>
 
@@ -521,261 +671,220 @@ export default function MapaGPS() {
               </button>
             </div>
 
-            <div style={styles.metricsRow}>
+            <div style={styles.metrics}>
               <div style={styles.metric}>
-                <span style={styles.metricK}>DIST</span>
-                <b style={styles.metricV}>{km(route.distanceM)} km</b>
+                <div style={styles.k}>KM</div>
+                <div style={styles.v}>{km(route.distanceM).toFixed(1)}</div>
               </div>
               <div style={styles.metric}>
-                <span style={styles.metricK}>TEMPO</span>
-                <b style={styles.metricV}>{mins(route.durationS)} min</b>
+                <div style={styles.k}>MIN</div>
+                <div style={styles.v}>{mins(route.durationS)}</div>
               </div>
-
               <div style={styles.metricStrong}>
-                <span style={styles.metricK}>LITROS</span>
-                <b style={styles.metricBig}>
-                  {fuelCalc?.liters != null ? fuelCalc.liters.toFixed(2) : "--"} L
-                </b>
+                <div style={styles.k}>LITROS</div>
+                <div style={styles.vStrong}>{bottom?.liters != null ? bottom.liters.toFixed(2) : "--"}</div>
               </div>
             </div>
 
-            <div style={styles.moneyCard}>
-              {fuelCalc?.needsVehicle ? (
-                <div>
-                  <b style={{ color: "#0f172a" }}>Cadastre consumo + preço</b>
-                  <div style={{ marginTop: 4, fontSize: 12, opacity: 0.8 }}>
-                    Vá em <b>CarBase</b> e preencha “Consumo” e “Preço”.
-                  </div>
+            <div style={styles.money}>
+              <div>
+                <div style={{ fontSize: 12, opacity: 0.75 }}>Custo</div>
+                <div style={{ fontSize: 18, fontWeight: 1000 }}>
+                  {bottom?.cost != null ? `R$ ${bottom.cost.toFixed(2)}` : "Preencha preço/consumo"}
                 </div>
-              ) : (
-                <div style={{ width: "100%" }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
-                    <div>
-                      <div style={{ fontSize: 12, opacity: 0.8 }}>Custo estimado</div>
-                      <div style={{ fontSize: 18, fontWeight: 900 }}>
-                        R$ {fuelCalc.cost.toFixed(2)}
-                      </div>
-                    </div>
+              </div>
+              <div style={{ textAlign: "right" }}>
+                <div style={{ fontSize: 12, opacity: 0.75 }}>Vantagem</div>
+                <div
+                  style={{
+                    fontSize: 18,
+                    fontWeight: 1000,
+                    color: bottom?.advantage >= 0 ? "#16a34a" : "#ef4444",
+                    animation: "ecoPulse 1.25s ease-in-out infinite",
+                  }}
+                >
+                  {bottom?.advantage != null ? `${bottom.advantage >= 0 ? "+" : "-"} R$ ${Math.abs(bottom.advantage).toFixed(2)}` : "--"}
+                </div>
+              </div>
+            </div>
 
-                    <div style={{ textAlign: "right" }}>
-                      <div style={{ fontSize: 12, opacity: 0.8 }}>Vantagem (estim.)</div>
-                      <div
-                        style={{
-                          fontSize: 18,
-                          fontWeight: 900,
-                          color: fuelCalc.advantage >= 0 ? "#16a34a" : "#ef4444",
-                          animation: "ecoPulse 1.25s ease-in-out infinite",
-                        }}
-                      >
-                        {fuelCalc.advantage >= 0 ? "+" : "-"} R$ {Math.abs(fuelCalc.advantage).toFixed(2)}
-                      </div>
-                    </div>
-                  </div>
+            <div style={styles.tankLine}>
+              <div>
+                <div style={{ fontSize: 12, opacity: 0.75 }}>Tanque</div>
+                <div style={{ fontWeight: 1000 }}>
+                  {tank.levelL.toFixed(1)}L / {tank.capacityL.toFixed(0)}L
+                </div>
+              </div>
 
-                  <div style={{ marginTop: 10, fontSize: 11, opacity: 0.7 }}>
-                    * “Vantagem” é uma estimativa crua (comparação por fator). Depois trocamos por EcoRoute real.
-                  </div>
-
-                  <div style={{ marginTop: 12, display: "flex", gap: 10 }}>
-                    <button
-                      onClick={() => setTripActive((v) => !v)}
-                      style={{
-                        ...styles.actionBtn,
-                        background: tripActive ? "#0f172a" : "#2563eb",
-                      }}
-                    >
-                      {tripActive ? "Parar" : "Iniciar"}
-                    </button>
-
-                    <button
-                      onClick={applyEstimatedConsumption}
-                      style={{
-                        ...styles.actionBtn,
-                        background: "#d97706",
-                      }}
-                      disabled={fuelCalc?.liters == null}
-                    >
-                      Debitar (teste)
-                    </button>
-
-                    <div style={{ marginLeft: "auto", fontSize: 12, opacity: 0.8, alignSelf: "center" }}>
-                      Tanque: <b>{tank.levelL.toFixed(1)}L</b> / {tank.capacityL.toFixed(0)}L
-                    </div>
-                  </div>
-
-                  {fuelCalc?.liters != null && tank.levelL < fuelCalc.liters && (
-                    <div style={{ marginTop: 10, padding: "8px 10px", borderRadius: 12, background: "rgba(239,68,68,.12)", color: "#991b1b", fontWeight: 800 }}>
-                      Combustível insuficiente para essa rota.
-                    </div>
-                  )}
+              {fuelOk === false && (
+                <div style={styles.alertRed}>Sem combustível pra rota</div>
+              )}
+              {fuelOk === true && bottom?.liters != null && (
+                <div style={styles.alertGreen}>
+                  Sobra ~{(tank.levelL - bottom.liters).toFixed(1)}L
                 </div>
               )}
             </div>
+
+            {tripActive && (
+              <div style={styles.tripBox}>
+                <div>
+                  <div style={{ fontSize: 12, opacity: 0.75 }}>Viagem (ao vivo)</div>
+                  <div style={{ fontWeight: 1000 }}>{tripKm.toFixed(2)} km</div>
+                </div>
+                <div style={{ textAlign: "right" }}>
+                  <div style={{ fontSize: 12, opacity: 0.75 }}>Gasto real</div>
+                  <div style={{ fontWeight: 1000 }}>{tripUsedL.toFixed(2)} L</div>
+                </div>
+              </div>
+            )}
           </motion.div>
         )}
       </AnimatePresence>
+
+      {busy.map && <div style={styles.loading}>Carregando mapa…</div>}
     </div>
   );
 }
 
-function truncate(s, n) {
-  if (!s) return s;
-  if (s.length <= n) return s;
-  return s.slice(0, n - 1) + "…";
-}
-
-// haversine (km)
-function haversineKm(lat1, lon1, lat2, lon2) {
-  const R = 6371;
-  const dLat = ((lat2 - lat1) * Math.PI) / 180;
-  const dLon = ((lon2 - lon1) * Math.PI) / 180;
-  const a =
-    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos((lat1 * Math.PI) / 180) *
-      Math.cos((lat2 * Math.PI) / 180) *
-      Math.sin(dLon / 2) *
-      Math.sin(dLon / 2);
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  return R * c;
-}
-
+/* ---------- Styles ---------- */
 const styles = {
-  wrap: { position: "relative", width: "100vw", height: "100vh", overflow: "hidden", background: "#e5e7eb" },
-  mapCanvas: { width: "100%", height: "100%" },
+  wrap: { position: "relative", width: "100vw", height: "100vh", background: BG },
+  map: { position: "absolute", inset: 0 },
 
-  topBar: { position: "absolute", top: 12, left: 12, right: 12, zIndex: 9999 },
-  searchForm: {
-    display: "flex",
-    background: "rgba(255,255,255,0.92)",
-    border: "1px solid rgba(15,23,42,0.08)",
-    borderRadius: 18,
-    overflow: "hidden",
-    backdropFilter: "blur(12px)",
-    WebkitBackdropFilter: "blur(12px)",
-    boxShadow: "0 10px 26px rgba(15,23,42,0.10)",
-  },
-  searchInput: { flex: 1, border: "none", outline: "none", padding: "12px 14px", fontSize: 16, background: "transparent" },
-  searchBtn: { border: "none", background: "transparent", padding: "0 14px", fontSize: 18, cursor: "pointer" },
-
-  loading: { position: "absolute", inset: 0, display: "grid", placeItems: "center", zIndex: 9998, pointerEvents: "none" },
-  loadingCard: {
-    background: "rgba(255,255,255,0.92)",
-    border: "1px solid rgba(15,23,42,0.08)",
-    borderRadius: 18,
-    padding: "14px 16px",
-    boxShadow: "0 10px 26px rgba(15,23,42,0.10)",
-    backdropFilter: "blur(12px)",
-    WebkitBackdropFilter: "blur(12px)",
+  loading: {
+    position: "absolute",
+    left: 12,
+    bottom: 92,
+    padding: "10px 12px",
+    borderRadius: 14,
+    background: "rgba(0,0,0,0.35)",
+    border: "1px solid rgba(255,255,255,0.12)",
+    color: "#fff",
+    fontWeight: 900,
+    zIndex: 9999,
   },
 
-  fabs: { position: "absolute", right: 14, bottom: 92, display: "flex", flexDirection: "column", gap: 10, zIndex: 9999 },
-  fab: {
+  topIsland: {
+    position: "absolute",
+    left: 12,
+    right: 12,
+    top: 0,
+    zIndex: 9999,
+    background: "rgba(0,0,0,0.38)",
+    border: "1px solid rgba(255,255,255,0.12)",
+    borderRadius: 22,
+    padding: 10,
+    backdropFilter: "blur(18px)",
+    WebkitBackdropFilter: "blur(18px)",
+    boxShadow: "0 20px 50px rgba(0,0,0,0.25)",
+  },
+  tools: { display: "flex", gap: 10, justifyContent: "space-between", flexWrap: "wrap" },
+  toolBtn: {
+    flex: "1 1 90px",
+    padding: "10px 10px",
+    borderRadius: 18,
+    border: "1px solid rgba(255,255,255,0.14)",
+    background: "rgba(255,255,255,0.06)",
+    color: "#fff",
+    fontWeight: 1000,
+    cursor: "pointer",
+    fontSize: 12,
+  },
+  toolMini: { marginLeft: 6, fontSize: 10, opacity: 0.85 },
+
+  wakeBtn: {
+    position: "absolute",
+    top: 16,
+    right: 12,
+    zIndex: 9999,
     width: 54,
     height: 54,
     borderRadius: 18,
-    border: "1px solid rgba(15,23,42,0.10)",
-    background: "rgba(255,255,255,0.92)",
-    boxShadow: "0 10px 26px rgba(15,23,42,0.12)",
-    cursor: "pointer",
-    fontSize: 22,
-  },
-
-  // tank
-  tankWrap: {
-    position: "absolute",
-    left: 12,
-    top: "35%",
-    transform: "translateY(-50%)",
-    zIndex: 9999,
-    width: 42,
-    padding: "10px 8px",
-    borderRadius: 18,
-    background: "rgba(255,255,255,0.92)",
-    border: "1px solid rgba(15,23,42,0.08)",
-    boxShadow: "0 10px 26px rgba(15,23,42,0.12)",
-    backdropFilter: "blur(12px)",
-    WebkitBackdropFilter: "blur(12px)",
-    display: "flex",
-    flexDirection: "column",
-    alignItems: "center",
-    gap: 8,
-    cursor: "pointer",
-    userSelect: "none",
-  },
-  tankLabelTop: { fontSize: 10, fontWeight: 900, color: "#0f172a", opacity: 0.7 },
-  tankLabelBottom: { fontSize: 10, fontWeight: 900, color: "#0f172a", opacity: 0.7 },
-  dotsCol: { display: "flex", flexDirection: "column", gap: 5 },
-  dot: {
-    width: 10,
-    height: 10,
-    borderRadius: 999,
-    background: "#16a34a",
-  },
-  litersToast: {
-    position: "absolute",
-    left: 48,
-    top: "50%",
-    transform: "translateY(-50%)",
-    background: "rgba(15,23,42,0.92)",
+    border: "1px solid rgba(255,255,255,0.14)",
+    background: "rgba(0,0,0,0.35)",
     color: "#fff",
-    borderRadius: 14,
-    padding: "10px 12px",
-    boxShadow: "0 10px 26px rgba(15,23,42,0.25)",
-    minWidth: 90,
-    textAlign: "center",
+    fontSize: 28,
+    fontWeight: 900,
+    cursor: "pointer",
+    backdropFilter: "blur(14px)",
+    WebkitBackdropFilter: "blur(14px)",
   },
 
-  // bottom sheet
+  modalOverlay: {
+    position: "absolute",
+    inset: 0,
+    zIndex: 10000,
+    background: "rgba(0,0,0,0.45)",
+    display: "grid",
+    placeItems: "center",
+    padding: 16,
+  },
+  modal: {
+    width: "100%",
+    maxWidth: 520,
+    background: CARD,
+    border: `1px solid ${BORDER}`,
+    borderRadius: 22,
+    padding: 14,
+    boxShadow: "0 20px 60px rgba(0,0,0,0.22)",
+  },
+  input: { flex: 1, padding: 12, borderRadius: 14, border: `1px solid ${BORDER}`, outline: "none" },
+  goBtn: { padding: "12px 14px", borderRadius: 14, border: "none", background: ORANGE, fontWeight: 1000, cursor: "pointer" },
+
   sheet: {
     position: "absolute",
     left: 12,
     right: 12,
-    bottom: 84, // acima do BottomMenu
+    bottom: 84,
     zIndex: 9999,
     borderRadius: 22,
     padding: 14,
-    background: "rgba(255,255,255,0.94)",
-    border: "1px solid rgba(15,23,42,0.08)",
+    background: CARD,
+    border: `1px solid ${BORDER}`,
     boxShadow: "0 18px 50px rgba(15,23,42,0.18)",
     backdropFilter: "blur(18px)",
     WebkitBackdropFilter: "blur(18px)",
   },
-  sheetHandle: { width: 48, height: 5, borderRadius: 999, background: "rgba(15,23,42,0.14)", margin: "0 auto 10px" },
-  sheetTitle: { fontSize: 12, fontWeight: 900, letterSpacing: 0.5, color: "#64748b" },
-  sheetSub: { fontSize: 14, fontWeight: 900, color: "#0f172a", marginTop: 2 },
   closeBtn: { border: "none", background: "transparent", cursor: "pointer", fontSize: 18, opacity: 0.65 },
 
-  metricsRow: { marginTop: 10, display: "grid", gridTemplateColumns: "1fr 1fr 1.4fr", gap: 10 },
-  metric: {
-    borderRadius: 16,
-    padding: 10,
-    background: "rgba(248,250,252,0.9)",
-    border: "1px solid rgba(15,23,42,0.06)",
+  destLine: {
+    fontSize: 14,
+    fontWeight: 1000,
+    color: "#0f172a",
+    marginTop: 2,
+    whiteSpace: "nowrap",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
   },
-  metricStrong: {
-    borderRadius: 16,
-    padding: 10,
-    background: "rgba(34,197,94,0.10)",
-    border: "1px solid rgba(34,197,94,0.20)",
-  },
-  metricK: { fontSize: 10, fontWeight: 900, color: "#64748b", letterSpacing: 0.7 },
-  metricV: { display: "block", marginTop: 4, fontSize: 14, fontWeight: 900, color: "#0f172a" },
-  metricBig: { display: "block", marginTop: 2, fontSize: 18, fontWeight: 1000, color: "#16a34a" },
 
-  moneyCard: {
+  metrics: { marginTop: 10, display: "grid", gridTemplateColumns: "1fr 1fr 1.4fr", gap: 10 },
+  metric: { borderRadius: 16, padding: 10, background: "rgba(248,250,252,0.9)", border: "1px solid rgba(15,23,42,0.06)" },
+  metricStrong: { borderRadius: 16, padding: 10, background: "rgba(255,106,0,0.10)", border: "1px solid rgba(255,106,0,0.22)" },
+  k: { fontSize: 10, fontWeight: 1000, color: "#64748b", letterSpacing: 0.7 },
+  v: { marginTop: 4, fontSize: 14, fontWeight: 1000, color: "#0f172a" },
+  vStrong: { marginTop: 2, fontSize: 18, fontWeight: 1100, color: ORANGE },
+
+  money: { marginTop: 10, display: "flex", justifyContent: "space-between", gap: 12 },
+
+  tankLine: {
     marginTop: 10,
-    borderRadius: 18,
-    padding: 12,
-    background: "rgba(255,255,255,0.92)",
-    border: "1px solid rgba(15,23,42,0.06)",
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    gap: 12,
+    paddingTop: 10,
+    borderTop: "1px solid rgba(15,23,42,0.06)",
   },
+  alertRed: { padding: "8px 10px", borderRadius: 14, background: "rgba(239,68,68,.12)", color: "#991b1b", fontWeight: 1000 },
+  alertGreen: { padding: "8px 10px", borderRadius: 14, background: "rgba(22,163,74,.12)", color: "#14532d", fontWeight: 1000 },
 
-  actionBtn: {
+  tripBox: {
+    marginTop: 10,
     padding: "10px 12px",
     borderRadius: 14,
-    border: "none",
-    color: "#fff",
-    fontWeight: 1000,
-    cursor: "pointer",
+    background: "rgba(15,23,42,0.06)",
+    display: "flex",
+    justifyContent: "space-between",
   },
 };
