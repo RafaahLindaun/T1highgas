@@ -10,6 +10,7 @@ import Conta from "./pages/Conta";
 import BottomMenu from "./components/BottomMenu";
 import ProtectedRoute from "./components/ProtectedRoute";
 import { AuthProvider, useAuth } from "./context/AuthContext";
+import { EcoProvider } from "./context/EcoContext";
 
 function AppRoutes() {
   const { user } = useAuth();
@@ -17,52 +18,14 @@ function AppRoutes() {
   return (
     <BrowserRouter>
       <Routes>
-        {/* pública */}
         <Route path="/" element={!user ? <Login /> : <Navigate to="/mapa" />} />
 
-        {/* protegidas */}
-        <Route
-          path="/mapa"
-          element={
-            <ProtectedRoute>
-              <MapaGPS />
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="/ia"
-          element={
-            <ProtectedRoute>
-              <IA_Command />
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="/carbase"
-          element={
-            <ProtectedRoute>
-              <CarBase />
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="/routes"
-          element={
-            <ProtectedRoute>
-              <RoutesHistory />
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="/conta"
-          element={
-            <ProtectedRoute>
-              <Conta />
-            </ProtectedRoute>
-          }
-        />
+        <Route path="/mapa" element={<ProtectedRoute><MapaGPS /></ProtectedRoute>} />
+        <Route path="/ia" element={<ProtectedRoute><IA_Command /></ProtectedRoute>} />
+        <Route path="/carbase" element={<ProtectedRoute><CarBase /></ProtectedRoute>} />
+        <Route path="/routes" element={<ProtectedRoute><RoutesHistory /></ProtectedRoute>} />
+        <Route path="/conta" element={<ProtectedRoute><Conta /></ProtectedRoute>} />
 
-        {/* fallback */}
         <Route path="*" element={<Navigate to={user ? "/mapa" : "/"} />} />
       </Routes>
 
@@ -74,7 +37,9 @@ function AppRoutes() {
 export default function App() {
   return (
     <AuthProvider>
-      <AppRoutes />
+      <EcoProvider>
+        <AppRoutes />
+      </EcoProvider>
     </AuthProvider>
   );
 }
