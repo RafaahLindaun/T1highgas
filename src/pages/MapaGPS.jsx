@@ -5,11 +5,36 @@ import { useEco } from "../context/EcoContext";
 
 const DEFAULT_CENTER = { lat: -23.5505, lon: -46.6333 };
 const TANK_KEY = "@EcoRoute:Tank:v1";
+const ROUTE_MODE_KEY = "@EcoRoute:RouteMode:v1";
+const VISITED_KEY = "@EcoRoute:VisitedRoads:v1";
 
-// “vantagem” (cru): economia estimada vs “rota comum” (fator)
-const BASELINE_COST_MULTIPLIER = 1.08;
+const C = {
+  bg: "#E9EEF5",
+  card: "rgba(255,255,255,0.94)",
+  line: "rgba(15,23,42,0.10)",
+  text: "#0F172A",
+  sub: "#64748B",
+  accent: "#007AFF",
+  success: "#16A34A",
+  danger: "#EF4444",
+  dark: "#111827",
+};
 
-// --- Leaflet CDN (sem depender de npm) ---
+function readJSON(key, fallback) {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function writeJSON(key, value) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch {}
+}
+
 function loadLeaflet() {
   if (window.L) return Promise.resolve(window.L);
 
@@ -53,35 +78,350 @@ function n(v) {
   return Number.isFinite(num) ? num : null;
 }
 
+function clamp(x, a, b) {
+  return Math.max(a, Math.min(b, x));
+}
+
 function km(m) {
-  return (m / 1000).toFixed(m > 9999 ? 0 : 1);
+  return m / 1000;
 }
 
 function mins(s) {
   return Math.round(s / 60);
 }
 
-function clamp(x, a, b) {
-  return Math.max(a, Math.min(b, x));
+function formatKm(m) {
+  return `${km(m).toFixed(m > 10000 ? 0 : 1)} km`;
 }
 
-function readTank() {
+function formatMin(s) {
+  return `${mins(s)} min`;
+}
+
+function haversineKm(lat1, lon1, lat2, lon2) {
+  const R = 6371;
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLon = ((lon2 - lon1) * Math.PI) / 180;
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos((lat1 * Math.PI) / 180) *
+      Math.cos((lat2 * Math.PI) / 180) *
+      Math.sin(dLon / 2) *
+      Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
+
+function bearingDeg(lat1, lon1, lat2, lon2) {
+  const φ1 = (lat1 * Math.PI) / 180;
+  const φ2 = (lat2 * Math.PI) / 180;
+  const λ1 = (lon1 * Math.PI) / 180;
+  const λ2 = (lon2 * Math.PI) / 180;
+  const y = Math.sin(λ2 - λ1) * Math.cos(φ2);
+  const x = Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(λ2 - λ1);
+  const θ = Math.atan2(y, x);
+  return ((θ * 180) / Math.PI + 360) % 360;
+}
+
+function parseCoordinates(input) {
+  const clean = String(input || "").trim().replace(/[()]/g, "");
+  const match = clean.match(/(-?\d+(?:\.\d+)?)\s*[,; ]\s*(-?\d+(?:\.\d+)?)/);
+  if (!match) return null;
+
+  const a = Number(match[1]);
+  const b = Number(match[2]);
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
+
+  if (Math.abs(a) <= 90 && Math.abs(b) <= 180) {
+    return { lat: a, lon: b, label: `${a.toFixed(6)}, ${b.toFixed(6)}` };
+  }
+
+  if (Math.abs(b) <= 90 && Math.abs(a) <= 180) {
+    return { lat: b, lon: a, label: `${b.toFixed(6)}, ${a.toFixed(6)}` };
+  }
+
+  return null;
+}
+
+function truncate(s, n) {
+  if (!s) return s;
+  return s.length <= n ? s : `${s.slice(0, n - 1)}…`;
+}
+
+function sampleRoutePoints(coords, max = 28) {
+  if (!coords?.length) return [];
+  const step = Math.max(1, Math.floor(coords.length / max));
+  const out = [];
+  for (let i = 0; i < coords.length; i += step) {
+    const [lon, lat] = coords[i];
+    out.push({ lat, lon });
+  }
+  const last = coords[coords.length - 1];
+  if (last) out.push({ lat: last[1], lon: last[0] });
+  return out.slice(0, max);
+}
+
+async function estimateAscentM(samplePoints) {
   try {
-    const raw = localStorage.getItem(TANK_KEY);
-    if (!raw) return { capacityL: 50, levelL: 50 };
-    const t = JSON.parse(raw);
-    const cap = n(t.capacityL) ?? 50;
-    const lvl = n(t.levelL) ?? cap;
-    return { capacityL: cap, levelL: clamp(lvl, 0, cap) };
+    const pts = samplePoints.slice(0, 30);
+    const locations = pts.map((p) => `${p.lat},${p.lon}`).join("|");
+    const url = `https://api.opentopodata.org/v1/srtm90m?locations=${encodeURIComponent(locations)}`;
+    const res = await fetch(url);
+    const data = await res.json();
+    const results = data?.results;
+    if (!Array.isArray(results) || results.length < 2) return null;
+
+    let ascent = 0;
+    for (let i = 1; i < results.length; i++) {
+      const prev = Number(results[i - 1]?.elevation);
+      const cur = Number(results[i]?.elevation);
+      if (Number.isFinite(prev) && Number.isFinite(cur)) {
+        const diff = cur - prev;
+        if (diff > 0) ascent += diff;
+      }
+    }
+    return ascent;
   } catch {
-    return { capacityL: 50, levelL: 50 };
+    return null;
   }
 }
 
+function distancePointToSegmentMeters(p, a, b) {
+  const toXY = ({ lat, lon }) => ({
+    x: lon * 111320 * Math.cos((lat * Math.PI) / 180),
+    y: lat * 110540,
+  });
+
+  const P = toXY(p);
+  const A = toXY(a);
+  const B = toXY(b);
+
+  const ABx = B.x - A.x;
+  const ABy = B.y - A.y;
+  const APx = P.x - A.x;
+  const APy = P.y - A.y;
+
+  const ab2 = ABx * ABx + ABy * ABy;
+  const t = ab2 === 0 ? 0 : clamp((APx * ABx + APy * ABy) / ab2, 0, 1);
+
+  const x = A.x + ABx * t;
+  const y = A.y + ABy * t;
+  return Math.hypot(P.x - x, P.y - y);
+}
+
+function countPoiNearRoute(routeCoords, pois, thresholdMeters = 120) {
+  if (!routeCoords?.length || !pois?.length) return 0;
+  let count = 0;
+
+  pois.forEach((poi) => {
+    let hit = false;
+    for (let i = 1; i < routeCoords.length; i++) {
+      const a = { lat: routeCoords[i - 1][1], lon: routeCoords[i - 1][0] };
+      const b = { lat: routeCoords[i][1], lon: routeCoords[i][0] };
+      if (distancePointToSegmentMeters({ lat: poi.lat, lon: poi.lon }, a, b) <= thresholdMeters) {
+        hit = true;
+        break;
+      }
+    }
+    if (hit) count += 1;
+  });
+
+  return count;
+}
+
+async function geocodeOne(query) {
+  const coord = parseCoordinates(query);
+  if (coord) return coord;
+
+  const q = String(query || "").trim();
+  if (!q) return null;
+
+  const url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(q)}`;
+  const res = await fetch(url, {
+    headers: { "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8" },
+  });
+  const data = await res.json();
+  const first = data?.[0];
+  if (!first) return null;
+
+  return {
+    lat: Number(first.lat),
+    lon: Number(first.lon),
+    label: first.display_name || q,
+  };
+}
+
+async function fetchFuelStationsAround(lat, lon, radius = 4000) {
+  const q = `
+[out:json][timeout:12];
+(
+  node["amenity"="fuel"](around:${radius},${lat},${lon});
+  way["amenity"="fuel"](around:${radius},${lat},${lon});
+  relation["amenity"="fuel"](around:${radius},${lat},${lon});
+);
+out center;`;
+
+  const res = await fetch("https://overpass-api.de/api/interpreter", {
+    method: "POST",
+    headers: { "Content-Type": "text/plain;charset=UTF-8" },
+    body: q,
+  });
+  const data = await res.json();
+
+  return (data?.elements || [])
+    .map((el) => {
+      const lat2 = el.lat ?? el.center?.lat;
+      const lon2 = el.lon ?? el.center?.lon;
+      if (!Number.isFinite(lat2) || !Number.isFinite(lon2)) return null;
+      return {
+        id: String(el.id),
+        lat: lat2,
+        lon: lon2,
+        label: el.tags?.name || "Posto",
+        kind: "fuel",
+      };
+    })
+    .filter(Boolean);
+}
+
+async function fetchSpeedCamerasAround(lat, lon, radius = 5000) {
+  const q = `
+[out:json][timeout:12];
+(
+  node["highway"="speed_camera"](around:${radius},${lat},${lon});
+  node["enforcement"="maxspeed"](around:${radius},${lat},${lon});
+);
+out center;`;
+
+  const res = await fetch("https://overpass-api.de/api/interpreter", {
+    method: "POST",
+    headers: { "Content-Type": "text/plain;charset=UTF-8" },
+    body: q,
+  });
+  const data = await res.json();
+
+  return (data?.elements || [])
+    .map((el) => {
+      const lat2 = el.lat ?? el.center?.lat;
+      const lon2 = el.lon ?? el.center?.lon;
+      if (!Number.isFinite(lat2) || !Number.isFinite(lon2)) return null;
+      return {
+        id: String(el.id),
+        lat: lat2,
+        lon: lon2,
+        label: el.tags?.name || "Radar",
+        kind: "camera",
+      };
+    })
+    .filter(Boolean);
+}
+
+async function fetchTollsAround(lat, lon, radius = 7000) {
+  const q = `
+[out:json][timeout:12];
+(
+  node["barrier"="toll_booth"](around:${radius},${lat},${lon});
+  node["toll"="yes"](around:${radius},${lat},${lon});
+  way["barrier"="toll_booth"](around:${radius},${lat},${lon});
+);
+out center;`;
+
+  const res = await fetch("https://overpass-api.de/api/interpreter", {
+    method: "POST",
+    headers: { "Content-Type": "text/plain;charset=UTF-8" },
+    body: q,
+  });
+  const data = await res.json();
+
+  return (data?.elements || [])
+    .map((el) => {
+      const lat2 = el.lat ?? el.center?.lat;
+      const lon2 = el.lon ?? el.center?.lon;
+      if (!Number.isFinite(lat2) || !Number.isFinite(lon2)) return null;
+      return {
+        id: String(el.id),
+        lat: lat2,
+        lon: lon2,
+        label: el.tags?.name || "Pedágio",
+        kind: "toll",
+      };
+    })
+    .filter(Boolean);
+}
+
+function readTank() {
+  const t = readJSON(TANK_KEY, { capacityL: 50, levelL: 50 });
+  const cap = n(t.capacityL) ?? 50;
+  const lvl = n(t.levelL) ?? cap;
+  return { capacityL: cap, levelL: clamp(lvl, 0, cap) };
+}
+
 function writeTank(tank) {
-  try {
-    localStorage.setItem(TANK_KEY, JSON.stringify(tank));
-  } catch {}
+  writeJSON(TANK_KEY, tank);
+}
+
+function readVisited() {
+  return readJSON(VISITED_KEY, []);
+}
+
+function writeVisited(points) {
+  writeJSON(VISITED_KEY, points.slice(-2000));
+}
+
+function getRouteMode() {
+  const m = localStorage.getItem(ROUTE_MODE_KEY);
+  return m === "fast" || m === "balanced" || m === "eco" ? m : "eco";
+}
+
+function setRouteModeStorage(v) {
+  localStorage.setItem(ROUTE_MODE_KEY, v);
+}
+
+function iconSvg(type) {
+  const common = 'width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#111827" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"';
+  if (type === "search") return `<svg ${common}><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path></svg>`;
+  if (type === "locate") return `<svg ${common}><circle cx="12" cy="12" r="3"></circle><path d="M12 2v3"></path><path d="M12 19v3"></path><path d="M2 12h3"></path><path d="M19 12h3"></path></svg>`;
+  if (type === "plus") return `<svg ${common}><path d="M12 5v14"></path><path d="M5 12h14"></path></svg>`;
+  if (type === "minus") return `<svg ${common}><path d="M5 12h14"></path></svg>`;
+  if (type === "compass") return `<svg ${common}><circle cx="12" cy="12" r="9"></circle><path d="m15.5 8.5-2.4 6.4-4.6 1.6 2.4-6.4 4.6-1.6Z"></path></svg>`;
+  if (type === "camera") return `<svg ${common}><rect x="4" y="7" width="16" height="12" rx="2"></rect><path d="M9 7 10.5 5h3L15 7"></path><circle cx="12" cy="13" r="3"></circle></svg>`;
+  if (type === "toll") return `<svg ${common}><path d="M4 20V10l4-4 4 4v10"></path><path d="M12 20V8l4-4 4 4v12"></path></svg>`;
+  if (type === "fuel") return `<svg ${common}><path d="M8 20h8"></path><path d="M9 20V6a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v14"></path><path d="M15 8h2.5a1.5 1.5 0 0 1 1.5 1.5V16a1.5 1.5 0 0 0 1.5 1.5H21"></path></svg>`;
+  if (type === "route") return `<svg ${common}><circle cx="6" cy="18" r="2"></circle><path d="M8 18h7a4 4 0 1 0 0-8H9a4 4 0 1 1 0-8h8"></path><circle cx="18" cy="2" r="2"></circle></svg>`;
+  if (type === "start") return `<svg ${common}><path d="M8 5l10 7-10 7V5Z"></path></svg>`;
+  if (type === "stop") return `<svg ${common}><rect x="7" y="7" width="10" height="10" rx="1"></rect></svg>`;
+  if (type === "sheet") return `<svg ${common}><path d="M12 3v18"></path><path d="m6 9 6-6 6 6"></path></svg>`;
+  return `<svg ${common}><circle cx="12" cy="12" r="9"></circle></svg>`;
+}
+
+function uiIcon(type, size = 18) {
+  return (
+    <span
+      aria-hidden="true"
+      style={{ width: size, height: size, display: "inline-grid", placeItems: "center" }}
+      dangerouslySetInnerHTML={{
+        __html: iconSvg(type)
+          .replace('width="20"', `width="${size}"`)
+          .replace('height="20"', `height="${size}"`),
+      }}
+    />
+  );
+}
+
+function makeMapIcon(L, kind) {
+  const svg =
+    kind === "fuel"
+      ? `<svg width="20" height="20" viewBox="0 0 24 24" fill="#111827" xmlns="http://www.w3.org/2000/svg"><path d="M9 20h8V6a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v14Zm6-12v4h-4V8h4Zm2 0h2l1 2v6a2 2 0 0 0 2 2" stroke="#111827" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>`
+      : kind === "camera"
+      ? `<svg width="20" height="20" viewBox="0 0 24 24" fill="#111827" xmlns="http://www.w3.org/2000/svg"><rect x="4" y="7" width="16" height="12" rx="2" fill="none" stroke="#111827" stroke-width="1.6"/><path d="M9 7 10.5 5h3L15 7" fill="none" stroke="#111827" stroke-width="1.6"/><circle cx="12" cy="13" r="3" fill="none" stroke="#111827" stroke-width="1.6"/></svg>`
+      : `<svg width="20" height="20" viewBox="0 0 24 24" fill="#111827" xmlns="http://www.w3.org/2000/svg"><path d="M4 20V10l4-4 4 4v10" fill="none" stroke="#111827" stroke-width="1.6"/><path d="M12 20V8l4-4 4 4v12" fill="none" stroke="#111827" stroke-width="1.6"/></svg>`;
+
+  return L.divIcon({
+    className: `poi-${kind}`,
+    html: `<div style="width:30px;height:30px;border-radius:999px;background:#fff;border:1px solid rgba(15,23,42,.12);display:grid;place-items:center;box-shadow:0 10px 26px rgba(15,23,42,.18)">${svg}</div>`,
+    iconSize: [30, 30],
+    iconAnchor: [15, 15],
+  });
 }
 
 export default function MapaGPS() {
@@ -95,26 +435,48 @@ export default function MapaGPS() {
     userMarker: null,
     destMarker: null,
     routeLayer: null,
+    altRouteLayer: null,
+    passedLayer: null,
+    poiLayers: { fuel: null, camera: null, toll: null },
     watchId: null,
     lastGps: null,
   });
 
   const [ready, setReady] = useState(false);
-  const [busy, setBusy] = useState({ map: true, route: false });
+  const [busy, setBusy] = useState({ map: true, route: false, pois: false });
 
   const [search, setSearch] = useState("");
-  const [gps, setGps] = useState({ lat: null, lon: null });
+  const [gps, setGps] = useState({ lat: null, lon: null, heading: 0 });
+  const [routeMode, setRouteMode] = useState(getRouteMode);
+  const [routeAlternatives, setRouteAlternatives] = useState([]);
+  const [activeRouteIndex, setActiveRouteIndex] = useState(0);
+
+  const [showSearchBar, setShowSearchBar] = useState(true);
+  const [sheetOpen, setSheetOpen] = useState(false);
+  const [tripActive, setTripActive] = useState(false);
+  const [navMode, setNavMode] = useState(false);
 
   const [tank, setTank] = useState(() => readTank());
   const [showLitersToast, setShowLitersToast] = useState(false);
+  const [visitedPoints, setVisitedPoints] = useState(() => readVisited());
 
-  const [sheetOpen, setSheetOpen] = useState(false);
-  const [tripActive, setTripActive] = useState(false);
+  const [poiData, setPoiData] = useState({ fuel: [], camera: [], toll: [] });
+  const [poiVisible, setPoiVisible] = useState({ fuel: true, camera: true, toll: true });
 
-  // double click detector
   const clickTimer = useRef(null);
 
-  // inject a tiny CSS for a “chamativo” pulse
+  useEffect(() => {
+    writeTank(tank);
+  }, [tank]);
+
+  useEffect(() => {
+    writeVisited(visitedPoints);
+  }, [visitedPoints]);
+
+  useEffect(() => {
+    setRouteModeStorage(routeMode);
+  }, [routeMode]);
+
   useEffect(() => {
     const id = "eco-ui-css";
     if (document.getElementById(id)) return;
@@ -126,16 +488,86 @@ export default function MapaGPS() {
         50% { transform: scale(1.03); }
         100% { transform: scale(1); }
       }
+      .leaflet-control-attribution { display:none !important; }
     `;
     document.head.appendChild(style);
   }, []);
 
-  // persist tank
-  useEffect(() => {
-    writeTank(tank);
-  }, [tank]);
+  function drawVisitedPath() {
+    const { L, map } = leafletRef.current;
+    if (!L || !map) return;
+    if (leafletRef.current.passedLayer) {
+      map.removeLayer(leafletRef.current.passedLayer);
+      leafletRef.current.passedLayer = null;
+    }
+    if (visitedPoints.length < 2) return;
 
-  // init map + gps
+    const layer = L.polyline(
+      visitedPoints.map((p) => [p.lat, p.lon]),
+      {
+        color: "#F8FAFC",
+        weight: 5,
+        opacity: 0.9,
+        lineCap: "round",
+        lineJoin: "round",
+      }
+    ).addTo(map);
+    leafletRef.current.passedLayer = layer;
+  }
+
+  function updateThirdPersonCamera(pos) {
+    const { map } = leafletRef.current;
+    if (!map || !navMode) return;
+
+    const latlng = [pos.lat, pos.lon];
+    const p = map.project(latlng, map.getZoom());
+
+    const centerPoint = {
+      x: p.x,
+      y: p.y + 150,
+    };
+
+    const center = map.unproject(centerPoint, map.getZoom());
+    map.setView(center, Math.max(map.getZoom(), 17), { animate: true });
+  }
+
+  useEffect(() => {
+    drawVisitedPath();
+  }, [visitedPoints]);
+
+  function renderPoiLayers() {
+    const { L, map } = leafletRef.current;
+    if (!L || !map) return;
+
+    ["fuel", "camera", "toll"].forEach((kind) => {
+      const current = leafletRef.current.poiLayers[kind];
+      if (current) {
+        map.removeLayer(current);
+        leafletRef.current.poiLayers[kind] = null;
+      }
+
+      if (!poiVisible[kind]) return;
+      const items = poiData[kind] || [];
+      if (!items.length) return;
+
+      const layer = L.layerGroup();
+      const icon = makeMapIcon(L, kind);
+
+      items.forEach((item) => {
+        L.marker([item.lat, item.lon], { icon })
+          .addTo(layer)
+          .bindPopup(item.label || (kind === "fuel" ? "Posto" : kind === "camera" ? "Radar" : "Pedágio"));
+      });
+
+      layer.addTo(map);
+      leafletRef.current.poiLayers[kind] = layer;
+    });
+  }
+
+  useEffect(() => {
+    renderPoiLayers();
+  }, [poiData, poiVisible]);
+
   useEffect(() => {
     let mounted = true;
 
@@ -146,7 +578,6 @@ export default function MapaGPS() {
 
         leafletRef.current.L = L;
 
-        // evita “already initialized” em hot reload
         if (mapDivRef.current && mapDivRef.current._leaflet_id) {
           mapDivRef.current._leaflet_id = undefined;
         }
@@ -154,34 +585,36 @@ export default function MapaGPS() {
         const map = L.map(mapDivRef.current, {
           zoomControl: false,
           attributionControl: false,
-        }).setView([DEFAULT_CENTER.lat, DEFAULT_CENTER.lon], 13);
+          preferCanvas: true,
+          tap: true,
+          touchZoom: true,
+          doubleClickZoom: true,
+          scrollWheelZoom: true,
+          boxZoom: false,
+          keyboard: false,
+        }).setView([DEFAULT_CENTER.lat, DEFAULT_CENTER.lon], 14);
 
         L.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png", {
           maxZoom: 20,
         }).addTo(map);
 
-        // hillshade leve
         L.tileLayer("https://tiles.wmflabs.org/hillshading/{z}/{x}/{y}.png", {
-          opacity: 0.18,
+          opacity: 0.12,
           maxZoom: 18,
         }).addTo(map);
 
         const userIcon = L.divIcon({
           className: "eco-user",
-          html: `<div style="
-            width:14px;height:14px;border-radius:50%;
-            background:#2563eb;border:3px solid #fff;
-            box-shadow:0 10px 18px rgba(15,23,42,.18);
-          "></div>`,
-          iconSize: [20, 20],
-          iconAnchor: [10, 10],
+          html: `<div style="width:18px;height:18px;border-radius:999px;background:${C.accent};border:4px solid #fff;box-shadow:0 14px 28px rgba(15,23,42,.18)"></div>`,
+          iconSize: [26, 26],
+          iconAnchor: [13, 13],
         });
 
         const userMarker = L.marker([DEFAULT_CENTER.lat, DEFAULT_CENTER.lon], { icon: userIcon }).addTo(map);
 
         map.on("click", (e) => {
           const { lat, lng } = e.latlng;
-          const dest = { lat, lon: lng, label: "Destino (toque no mapa)" };
+          const dest = { lat, lon: lng, label: "Destino selecionado no mapa" };
           setDestination(dest);
         });
 
@@ -190,36 +623,54 @@ export default function MapaGPS() {
 
         setTimeout(() => map.invalidateSize(), 250);
 
-        // GPS live
+        const resizeMap = () => {
+          setTimeout(() => {
+            map.invalidateSize();
+          }, 120);
+        };
+
+        window.addEventListener("resize", resizeMap);
+        window.addEventListener("orientationchange", resizeMap);
+
         if ("geolocation" in navigator) {
           const watchId = navigator.geolocation.watchPosition(
             (pos) => {
-              const { latitude, longitude } = pos.coords;
+              const { latitude, longitude, heading } = pos.coords;
+              const prev = leafletRef.current.lastGps;
 
-              setGps({ lat: latitude, lon: longitude });
+              let computedHeading = Number.isFinite(heading) && heading !== null ? heading : 0;
+              if (prev) {
+                const dKm = haversineKm(prev.lat, prev.lon, latitude, longitude);
+                if (dKm > 0.003) {
+                  computedHeading = bearingDeg(prev.lat, prev.lon, latitude, longitude);
+                }
+              }
+
+              const nextGps = { lat: latitude, lon: longitude, heading: computedHeading };
+              setGps(nextGps);
+              leafletRef.current.lastGps = nextGps;
 
               const ll = [latitude, longitude];
               userMarker.setLatLng(ll);
-              map.panTo(ll, { animate: true, duration: 0.5 });
 
-              // consumo ao vivo (cru): se tripActive, debita pelo deslocamento real
-              if (tripActive) {
-                const prev = leafletRef.current.lastGps;
-                leafletRef.current.lastGps = { lat: latitude, lon: longitude };
+              if (tripActive && prev) {
+                const dKm = haversineKm(prev.lat, prev.lon, latitude, longitude);
+                const cons = n(vehicle?.consumption) ?? 10;
+                const usedL = dKm / cons;
 
-                if (prev) {
-                  const dKm = haversineKm(prev.lat, prev.lon, latitude, longitude);
-                  const cons = n(vehicle?.consumption) ?? 10; // fallback 10 km/L
-                  const usedL = dKm / cons;
-                  if (usedL > 0) {
-                    setTank((t) => {
-                      const next = { ...t, levelL: clamp(t.levelL - usedL, 0, t.capacityL) };
-                      return next;
-                    });
-                  }
+                if (dKm > 0.002) {
+                  setVisitedPoints((list) => [...list, { lat: latitude, lon: longitude }].slice(-2000));
                 }
+
+                if (usedL > 0) {
+                  setTank((t) => ({ ...t, levelL: clamp(t.levelL - usedL, 0, t.capacityL) }));
+                }
+              }
+
+              if (navMode) {
+                updateThirdPersonCamera(nextGps);
               } else {
-                leafletRef.current.lastGps = { lat: latitude, lon: longitude };
+                map.panTo(ll, { animate: true, duration: 0.45 });
               }
             },
             (err) => console.error("GPS erro:", err),
@@ -231,6 +682,11 @@ export default function MapaGPS() {
 
         setBusy((s) => ({ ...s, map: false }));
         setReady(true);
+
+        return () => {
+          window.removeEventListener("resize", resizeMap);
+          window.removeEventListener("orientationchange", resizeMap);
+        };
       } catch (e) {
         console.error(e);
         setBusy((s) => ({ ...s, map: false }));
@@ -238,9 +694,7 @@ export default function MapaGPS() {
     })();
 
     return () => {
-      mounted = false;
       const { map, watchId } = leafletRef.current;
-
       if (watchId != null && "geolocation" in navigator) navigator.geolocation.clearWatch(watchId);
       if (map) {
         map.off();
@@ -248,15 +702,12 @@ export default function MapaGPS() {
       }
       leafletRef.current.map = null;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tripActive, vehicle?.consumption]);
+  }, [tripActive, navMode, vehicle?.consumption, setDestination]);
 
-  // quando destination mudar (via IA ou clique/busca) -> marca destino e traça rota
   useEffect(() => {
     const { L, map } = leafletRef.current;
     if (!L || !map || !destination) return;
 
-    // dest marker
     if (leafletRef.current.destMarker) {
       map.removeLayer(leafletRef.current.destMarker);
       leafletRef.current.destMarker = null;
@@ -264,74 +715,162 @@ export default function MapaGPS() {
 
     const destIcon = L.divIcon({
       className: "eco-dest",
-      html: `<div style="
-        width:14px;height:14px;border-radius:50%;
-        background:#ef4444;border:3px solid #fff;
-        box-shadow:0 10px 18px rgba(15,23,42,.18);
-      "></div>`,
-      iconSize: [20, 20],
-      iconAnchor: [10, 10],
+      html: `<div style="width:18px;height:18px;border-radius:999px;background:#111827;border:4px solid #fff;box-shadow:0 14px 28px rgba(15,23,42,.18)"></div>`,
+      iconSize: [26, 26],
+      iconAnchor: [13, 13],
     });
 
     leafletRef.current.destMarker = L.marker([destination.lat, destination.lon], { icon: destIcon })
       .addTo(map)
       .bindPopup(destination.label || "Destino");
 
-    map.flyTo([destination.lat, destination.lon], 15, { duration: 0.6 });
+    map.flyTo([destination.lat, destination.lon], 16, { duration: 0.55 });
 
-    // rota se já tem GPS
     if (gps.lat != null && gps.lon != null) {
-      buildRoute({ lat: gps.lat, lon: gps.lon }, destination).catch(console.error);
+      buildRoutes({ lat: gps.lat, lon: gps.lon }, destination).catch(console.error);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [destination, gps.lat, gps.lon]);
+  }, [destination, gps.lat, gps.lon, routeMode]);
 
-  async function buildRoute(from, to) {
+  async function buildRoutes(from, to) {
     const { L, map } = leafletRef.current;
     if (!L || !map) return;
 
-    setBusy((s) => ({ ...s, route: true }));
+    setBusy((s) => ({ ...s, route: true, pois: true }));
 
-    // limpa rota anterior
     if (leafletRef.current.routeLayer) {
       map.removeLayer(leafletRef.current.routeLayer);
       leafletRef.current.routeLayer = null;
     }
+    if (leafletRef.current.altRouteLayer) {
+      map.removeLayer(leafletRef.current.altRouteLayer);
+      leafletRef.current.altRouteLayer = null;
+    }
 
-    // OSRM público (teste rápido)
-    const url = `https://router.project-osrm.org/route/v1/driving/${from.lon},${from.lat};${to.lon},${to.lat}?overview=full&geometries=geojson`;
+    const url = `https://router.project-osrm.org/route/v1/driving/${from.lon},${from.lat};${to.lon},${to.lat}?overview=full&geometries=geojson&alternatives=true&steps=true`;
     const res = await fetch(url);
     const data = await res.json();
 
-    const r = data?.routes?.[0];
-    if (!r?.geometry?.coordinates?.length) {
-      setBusy((s) => ({ ...s, route: false }));
+    const routes = Array.isArray(data?.routes) ? data.routes.slice(0, 2) : [];
+    if (!routes.length) {
+      setBusy((s) => ({ ...s, route: false, pois: false }));
       return;
     }
 
-    const latlngs = r.geometry.coordinates.map(([lon, lat]) => [lat, lon]);
+    let alternatives = routes.map((r, idx) => {
+      const cons = n(vehicle?.consumption);
+      const price = n(vehicle?.fuelPrice);
+      const liters = cons && cons > 0 ? km(r.distance) / cons : null;
+      const cost = liters != null && price && price > 0 ? liters * price : null;
 
-    const line = L.polyline(latlngs, {
-      weight: 6,
-      opacity: 0.92,
-    }).addTo(map);
+      return {
+        index: idx,
+        distanceM: r.distance,
+        durationS: r.duration,
+        liters,
+        cost,
+        ascentM: null,
+        tollCount: 0,
+        cameraCount: 0,
+        fuelCount: 0,
+        routeCoords: r.geometry?.coordinates || [],
+        label: to.label,
+      };
+    });
 
-    leafletRef.current.routeLayer = line;
-    map.fitBounds(line.getBounds(), { padding: [30, 30] });
+    try {
+      const ascentResults = await Promise.all(
+        alternatives.map(async (alt) => {
+          const samples = sampleRoutePoints(alt.routeCoords, 26);
+          const ascent = await estimateAscentM(samples);
+          return ascent;
+        })
+      );
+      alternatives = alternatives.map((alt, i) => ({ ...alt, ascentM: ascentResults[i] }));
+    } catch {}
+
+    const [fuel, camera, toll] = await Promise.all([
+      fetchFuelStationsAround((from.lat + to.lat) / 2, (from.lon + to.lon) / 2, 6000).catch(() => []),
+      fetchSpeedCamerasAround((from.lat + to.lat) / 2, (from.lon + to.lon) / 2, 7000).catch(() => []),
+      fetchTollsAround((from.lat + to.lat) / 2, (from.lon + to.lon) / 2, 10000).catch(() => []),
+    ]);
+    setPoiData({ fuel, camera, toll });
+
+    alternatives = alternatives.map((alt) => ({
+      ...alt,
+      tollCount: countPoiNearRoute(alt.routeCoords, toll, 220),
+      cameraCount: countPoiNearRoute(alt.routeCoords, camera, 150),
+      fuelCount: countPoiNearRoute(alt.routeCoords, fuel, 180),
+    }));
+
+    alternatives = alternatives.map((alt) => {
+      const liters = alt.liters ?? km(alt.distanceM) / (n(vehicle?.consumption) || 10);
+      const ascentPenalty = (alt.ascentM ?? 0) * 0.00008;
+      const tollPenalty = alt.tollCount * 0.12;
+      const speedPenalty = alt.cameraCount * 0.04;
+      const timeH = alt.durationS / 3600;
+
+      let score = liters + ascentPenalty + tollPenalty + speedPenalty;
+      if (routeMode === "fast") score = timeH + speedPenalty * 0.25;
+      if (routeMode === "balanced") score = liters * 0.75 + ascentPenalty + tollPenalty * 0.5 + timeH * 0.25;
+
+      return { ...alt, score };
+    });
+
+    const best =
+      routeMode === "fast"
+        ? alternatives.slice().sort((a, b) => a.durationS - b.durationS)[0]
+        : alternatives.slice().sort((a, b) => a.score - b.score)[0];
+
+    const bestIdx = best.index;
+    setActiveRouteIndex(bestIdx);
+    setRouteAlternatives(alternatives);
 
     const payload = {
       from,
       to,
-      distanceM: r.distance,
-      durationS: r.duration,
+      distanceM: best.distanceM,
+      durationS: best.durationS,
       label: to.label,
       createdAt: new Date().toISOString(),
+      litersEst: best.liters ?? undefined,
+      costEst: best.cost ?? undefined,
+      ascentM: best.ascentM ?? undefined,
+      tollCount: best.tollCount,
+      cameraCount: best.cameraCount,
+      fuelCount: best.fuelCount,
+      mode: routeMode,
     };
 
     setRoute(payload);
     setSheetOpen(true);
 
-    setBusy((s) => ({ ...s, route: false }));
+    const bestLatLngs = best.routeCoords.map(([lon, lat]) => [lat, lon]);
+    const mainLine = L.polyline(bestLatLngs, {
+      color: C.accent,
+      weight: 7,
+      opacity: 0.95,
+      lineCap: "round",
+      lineJoin: "round",
+      dashArray: "14 10",
+    }).addTo(map);
+
+    leafletRef.current.routeLayer = mainLine;
+
+    if (alternatives.length > 1) {
+      const altIdx = bestIdx === 0 ? 1 : 0;
+      const alt = alternatives[altIdx];
+      const altLatLngs = alt.routeCoords.map(([lon, lat]) => [lat, lon]);
+      const altLine = L.polyline(altLatLngs, {
+        color: "#111827",
+        weight: 5,
+        opacity: 0.32,
+        dashArray: "10 12",
+      }).addTo(map);
+      leafletRef.current.altRouteLayer = altLine;
+    }
+
+    map.fitBounds(mainLine.getBounds(), { padding: [30, 30] });
+    setBusy((s) => ({ ...s, route: false, pois: false }));
   }
 
   async function handleSearch(e) {
@@ -341,17 +880,10 @@ export default function MapaGPS() {
 
     try {
       setBusy((s) => ({ ...s, route: true }));
-      const url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(q)}`;
-      const res = await fetch(url);
-      const data = await res.json();
-      const first = data?.[0];
-      if (!first) return;
-
-      setDestination({
-        lat: Number(first.lat),
-        lon: Number(first.lon),
-        label: first.display_name || q,
-      });
+      const found = await geocodeOne(q);
+      if (!found) return;
+      setDestination(found);
+      setSearch("");
     } catch (err) {
       console.error(err);
     } finally {
@@ -361,40 +893,31 @@ export default function MapaGPS() {
 
   function recenter() {
     const { map } = leafletRef.current;
-    if (!map) return;
-    if (gps.lat == null || gps.lon == null) return;
-    map.flyTo([gps.lat, gps.lon], 16, { duration: 0.6 });
+    if (!map || gps.lat == null || gps.lon == null) return;
+    map.flyTo([gps.lat, gps.lon], Math.max(map.getZoom(), 17), { duration: 0.5 });
   }
 
-  // --- Fuel numbers for the bottom sheet ---
-  const fuelCalc = useMemo(() => {
-    if (!route) return null;
+  function zoomIn() {
+    const { map } = leafletRef.current;
+    if (!map) return;
+    map.zoomIn();
+  }
 
-    const cons = n(vehicle?.consumption);
-    const price = n(vehicle?.fuelPrice);
+  function zoomOut() {
+    const { map } = leafletRef.current;
+    if (!map) return;
+    map.zoomOut();
+  }
 
-    const distKm = route.distanceM / 1000;
-
-    if (!cons || cons <= 0) {
-      return { distKm, liters: null, cost: null, advantage: null, needsVehicle: true };
-    }
-
-    const liters = distKm / cons;
-
-    if (!price || price <= 0) {
-      return { distKm, liters, cost: null, advantage: null, needsVehicle: true };
-    }
-
-    const cost = liters * price;
-    const baselineCost = cost * BASELINE_COST_MULTIPLIER;
-    const advantage = baselineCost - cost; // economia
-
-    return { distKm, liters, cost, advantage, needsVehicle: false };
-  }, [route, vehicle?.consumption, vehicle?.fuelPrice]);
+  function alignNorth() {
+    const { map } = leafletRef.current;
+    if (!map || gps.lat == null || gps.lon == null) return;
+    setNavMode(false);
+    map.flyTo([gps.lat, gps.lon], Math.max(map.getZoom(), 16), { duration: 0.45 });
+  }
 
   function onTankClick() {
     if (clickTimer.current) {
-      // double click
       clearTimeout(clickTimer.current);
       clickTimer.current = null;
       nav("/abastecimento");
@@ -408,58 +931,145 @@ export default function MapaGPS() {
     }, 240);
   }
 
-  function applyEstimatedConsumption() {
-    if (!fuelCalc?.liters) return;
-    setTank((t) => ({ ...t, levelL: clamp(t.levelL - fuelCalc.liters, 0, t.capacityL) }));
+  function startTrip() {
+    setTripActive(true);
+    setNavMode(true);
+    setShowSearchBar(false);
     if (route) addHistory(route);
   }
 
+  function stopTrip() {
+    setTripActive(false);
+    setNavMode(false);
+    setShowSearchBar(true);
+  }
+
+  const fuelCalc = useMemo(() => {
+    if (!route) return null;
+
+    const cons = n(vehicle?.consumption);
+    const price = n(vehicle?.fuelPrice);
+    const distKm = route.distanceM / 1000;
+
+    if (!cons || cons <= 0) {
+      return { distKm, liters: null, cost: null, needsVehicle: true };
+    }
+
+    const liters = distKm / cons;
+
+    if (!price || price <= 0) {
+      return { distKm, liters, cost: null, needsVehicle: true };
+    }
+
+    const cost = liters * price;
+
+    let otherCost = null;
+    if (routeAlternatives.length > 1) {
+      const other = routeAlternatives.find((r, idx) => idx !== activeRouteIndex);
+      otherCost = other?.cost ?? null;
+    }
+
+    return {
+      distKm,
+      liters,
+      cost,
+      advantage: otherCost != null ? otherCost - cost : cost * 0.08,
+      needsVehicle: false,
+    };
+  }, [route, vehicle?.consumption, vehicle?.fuelPrice, routeAlternatives, activeRouteIndex]);
+
   const percent = tank.capacityL > 0 ? clamp(tank.levelL / tank.capacityL, 0, 1) : 0;
+
+  const activeStats = useMemo(() => {
+    const current = routeAlternatives[activeRouteIndex];
+    if (!current) return { tolls: 0, cameras: 0, fuel: 0 };
+    return {
+      tolls: current.tollCount || 0,
+      cameras: current.cameraCount || 0,
+      fuel: current.fuelCount || 0,
+    };
+  }, [routeAlternatives, activeRouteIndex]);
 
   return (
     <div style={styles.wrap}>
-      {/* Search bar */}
-      <div style={styles.topBar}>
-        <form onSubmit={handleSearch} style={styles.searchForm}>
-          <input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Para onde vamos?"
-            style={styles.searchInput}
-          />
-          <button type="submit" style={styles.searchBtn}>
-            {busy.route ? "..." : "🔍"}
-          </button>
-        </form>
-      </div>
+      {showSearchBar && (
+        <div style={styles.topBar}>
+          <form onSubmit={handleSearch} style={styles.searchForm}>
+            <div style={styles.searchIcon}>{uiIcon("search", 18)}</div>
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Buscar por CEP, endereço ou coordenada"
+              style={styles.searchInput}
+            />
+            <button type="submit" style={styles.searchBtn}>
+              {busy.route ? "..." : "Ir"}
+            </button>
+          </form>
 
-      {/* Map */}
-      <div ref={mapDivRef} style={styles.mapCanvas} />
-
-      {/* Loading */}
-      {!ready && (
-        <div style={styles.loading}>
-          <div style={styles.loadingCard}>
-            <b>Carregando mapa…</b>
-            <div style={{ marginTop: 6, opacity: 0.75 }}>se demorar, atualize a página</div>
+          <div style={styles.infoPills}>
+            <div style={styles.pill}>{uiIcon("camera", 14)}<span>{activeStats.cameras}</span></div>
+            <div style={styles.pill}>{uiIcon("toll", 14)}<span>{activeStats.tolls}</span></div>
+            <div style={styles.pill}>{uiIcon("fuel", 14)}<span>{activeStats.fuel}</span></div>
           </div>
         </div>
       )}
 
-      {/* Fabs (direita) */}
-      <div style={styles.fabs}>
-        <button style={styles.fab} onClick={recenter} title="Centralizar GPS">
-          📍
+      <div ref={mapDivRef} style={styles.mapCanvas} />
+
+      {!ready && (
+        <div style={styles.loading}>
+          <div style={styles.loadingCard}>
+            <b>Carregando mapa</b>
+            <div style={{ marginTop: 6, opacity: 0.75 }}>aguarde alguns segundos</div>
+          </div>
+        </div>
+      )}
+
+      <div style={styles.rightControls}>
+        <button style={styles.ctrlBtn} onClick={zoomIn} title="Aproximar">
+          {uiIcon("plus", 18)}
+        </button>
+        <button style={styles.ctrlBtn} onClick={zoomOut} title="Afastar">
+          {uiIcon("minus", 18)}
+        </button>
+        <button style={styles.ctrlBtn} onClick={recenter} title="Centralizar">
+          {uiIcon("locate", 18)}
+        </button>
+        <button style={styles.ctrlBtn} onClick={alignNorth} title="Norte">
+          {uiIcon("compass", 18)}
         </button>
       </div>
 
-      {/* Fuel gauge (esquerda) */}
+      <div style={styles.poiControls}>
+        <button
+          style={{ ...styles.poiBtn, ...(poiVisible.camera ? styles.poiBtnActive : null) }}
+          onClick={() => setPoiVisible((p) => ({ ...p, camera: !p.camera }))}
+          title="Radares"
+        >
+          {uiIcon("camera", 16)}
+        </button>
+        <button
+          style={{ ...styles.poiBtn, ...(poiVisible.toll ? styles.poiBtnActive : null) }}
+          onClick={() => setPoiVisible((p) => ({ ...p, toll: !p.toll }))}
+          title="Pedágios"
+        >
+          {uiIcon("toll", 16)}
+        </button>
+        <button
+          style={{ ...styles.poiBtn, ...(poiVisible.fuel ? styles.poiBtnActive : null) }}
+          onClick={() => setPoiVisible((p) => ({ ...p, fuel: !p.fuel }))}
+          title="Postos"
+        >
+          {uiIcon("fuel", 16)}
+        </button>
+      </div>
+
       <div style={styles.tankWrap} onClick={onTankClick}>
         <div style={styles.tankLabelTop}>F</div>
 
         <div style={styles.dotsCol}>
           {Array.from({ length: 14 }).map((_, i) => {
-            // i=0 topo, i=13 base
             const levelIndex = 13 - i;
             const filledDots = Math.round(percent * 14);
             const filled = levelIndex < filledDots;
@@ -496,7 +1106,6 @@ export default function MapaGPS() {
         </AnimatePresence>
       </div>
 
-      {/* Bottom pop-up (chamativo) */}
       <AnimatePresence>
         {sheetOpen && route && (
           <motion.div
@@ -506,31 +1115,54 @@ export default function MapaGPS() {
             transition={{ type: "spring", stiffness: 260, damping: 28 }}
             style={styles.sheet}
           >
-            <div style={styles.sheetHandle} />
+            <motion.div
+              drag="y"
+              dragConstraints={{ top: -140, bottom: 0 }}
+              onDragEnd={(_, info) => {
+                if (info.offset.y < -90) startTrip();
+              }}
+              style={styles.dragHandleWrap}
+            >
+              <div style={styles.sheetHandle} />
+              <div style={styles.dragLabel}>
+                {uiIcon("sheet", 14)}
+                <span>Arraste para cima para iniciar</span>
+              </div>
+            </motion.div>
 
             <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
               <div style={{ minWidth: 0 }}>
-                <div style={styles.sheetTitle}>Estimativa</div>
+                <div style={styles.sheetTitle}>Rota</div>
                 <div style={styles.sheetSub}>
-                  {route.to?.label ? truncate(route.to.label, 52) : "Destino"}
+                  {route.to?.label ? truncate(route.to.label, 62) : "Destino"}
                 </div>
               </div>
 
-              <button onClick={() => setSheetOpen(false)} style={styles.closeBtn}>
-                ✕
-              </button>
+              <div style={styles.modeTabs}>
+                {["eco", "balanced", "fast"].map((mode) => (
+                  <button
+                    key={mode}
+                    onClick={() => setRouteMode(mode)}
+                    style={{
+                      ...styles.modeBtn,
+                      ...(routeMode === mode ? styles.modeBtnActive : null),
+                    }}
+                  >
+                    {mode === "eco" ? "Eco" : mode === "balanced" ? "Equil." : "Rápida"}
+                  </button>
+                ))}
+              </div>
             </div>
 
             <div style={styles.metricsRow}>
               <div style={styles.metric}>
                 <span style={styles.metricK}>DIST</span>
-                <b style={styles.metricV}>{km(route.distanceM)} km</b>
+                <b style={styles.metricV}>{formatKm(route.distanceM)}</b>
               </div>
               <div style={styles.metric}>
                 <span style={styles.metricK}>TEMPO</span>
-                <b style={styles.metricV}>{mins(route.durationS)} min</b>
+                <b style={styles.metricV}>{formatMin(route.durationS)}</b>
               </div>
-
               <div style={styles.metricStrong}>
                 <span style={styles.metricK}>LITROS</span>
                 <b style={styles.metricBig}>
@@ -539,31 +1171,46 @@ export default function MapaGPS() {
               </div>
             </div>
 
+            <div style={styles.routeDetails}>
+              <div style={styles.detailItem}>
+                <div style={styles.detailLabel}>Radares</div>
+                <div style={styles.detailValue}>{activeStats.cameras}</div>
+              </div>
+              <div style={styles.detailItem}>
+                <div style={styles.detailLabel}>Pedágios</div>
+                <div style={styles.detailValue}>{activeStats.tolls}</div>
+              </div>
+              <div style={styles.detailItem}>
+                <div style={styles.detailLabel}>Postos</div>
+                <div style={styles.detailValue}>{activeStats.fuel}</div>
+              </div>
+            </div>
+
             <div style={styles.moneyCard}>
               {fuelCalc?.needsVehicle ? (
                 <div>
-                  <b style={{ color: "#0f172a" }}>Cadastre consumo + preço</b>
-                  <div style={{ marginTop: 4, fontSize: 12, opacity: 0.8 }}>
-                    Vá em <b>CarBase</b> e preencha “Consumo” e “Preço”.
+                  <b style={{ color: C.text }}>Cadastre consumo e preço</b>
+                  <div style={{ marginTop: 4, fontSize: 12, color: C.sub }}>
+                    Vá em <b>CarBase</b> para liberar custo e economia.
                   </div>
                 </div>
               ) : (
                 <div style={{ width: "100%" }}>
                   <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
                     <div>
-                      <div style={{ fontSize: 12, opacity: 0.8 }}>Custo estimado</div>
+                      <div style={{ fontSize: 12, color: C.sub }}>Custo estimado</div>
                       <div style={{ fontSize: 18, fontWeight: 900 }}>
                         R$ {fuelCalc.cost.toFixed(2)}
                       </div>
                     </div>
 
                     <div style={{ textAlign: "right" }}>
-                      <div style={{ fontSize: 12, opacity: 0.8 }}>Vantagem (estim.)</div>
+                      <div style={{ fontSize: 12, color: C.sub }}>Vantagem</div>
                       <div
                         style={{
                           fontSize: 18,
                           fontWeight: 900,
-                          color: fuelCalc.advantage >= 0 ? "#16a34a" : "#ef4444",
+                          color: fuelCalc.advantage >= 0 ? C.success : C.danger,
                           animation: "ecoPulse 1.25s ease-in-out infinite",
                         }}
                       >
@@ -572,45 +1219,47 @@ export default function MapaGPS() {
                     </div>
                   </div>
 
-                  <div style={{ marginTop: 10, fontSize: 11, opacity: 0.7 }}>
-                    * “Vantagem” é uma estimativa crua (comparação por fator). Depois trocamos por EcoRoute real.
-                  </div>
-
-                  <div style={{ marginTop: 12, display: "flex", gap: 10 }}>
+                  <div style={{ marginTop: 12, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
                     <button
-                      onClick={() => setTripActive((v) => !v)}
+                      onClick={() => (tripActive ? stopTrip() : startTrip())}
                       style={{
                         ...styles.actionBtn,
-                        background: tripActive ? "#0f172a" : "#2563eb",
+                        background: tripActive ? C.dark : C.accent,
                       }}
                     >
-                      {tripActive ? "Parar" : "Iniciar"}
+                      {tripActive ? (
+                        <>
+                          <span style={{ display: "inline-flex", marginRight: 8 }}>{uiIcon("stop", 14)}</span>
+                          Parar
+                        </>
+                      ) : (
+                        <>
+                          <span style={{ display: "inline-flex", marginRight: 8 }}>{uiIcon("start", 14)}</span>
+                          Iniciar
+                        </>
+                      )}
                     </button>
 
-                    <button
-                      onClick={applyEstimatedConsumption}
-                      style={{
-                        ...styles.actionBtn,
-                        background: "#d97706",
-                      }}
-                      disabled={fuelCalc?.liters == null}
-                    >
-                      Debitar (teste)
-                    </button>
-
-                    <div style={{ marginLeft: "auto", fontSize: 12, opacity: 0.8, alignSelf: "center" }}>
-                      Tanque: <b>{tank.levelL.toFixed(1)}L</b> / {tank.capacityL.toFixed(0)}L
+                    <div style={{ fontSize: 12, color: C.sub }}>
+                      Tanque: <b style={{ color: C.text }}>{tank.levelL.toFixed(1)}L</b> / {tank.capacityL.toFixed(0)}L
                     </div>
                   </div>
 
                   {fuelCalc?.liters != null && tank.levelL < fuelCalc.liters && (
-                    <div style={{ marginTop: 10, padding: "8px 10px", borderRadius: 12, background: "rgba(239,68,68,.12)", color: "#991b1b", fontWeight: 800 }}>
+                    <div style={styles.warningBox}>
                       Combustível insuficiente para essa rota.
                     </div>
                   )}
                 </div>
               )}
             </div>
+
+            {tripActive && (
+              <div style={styles.navBanner}>
+                <div style={styles.navBannerTitle}>Navegação ativa</div>
+                <div style={styles.navBannerSub}>Câmera com visão avançada e contagem em tempo real.</div>
+              </div>
+            )}
           </motion.div>
         )}
       </AnimatePresence>
@@ -618,49 +1267,102 @@ export default function MapaGPS() {
   );
 }
 
-function truncate(s, n) {
-  if (!s) return s;
-  if (s.length <= n) return s;
-  return s.slice(0, n - 1) + "…";
-}
-
-// haversine (km)
-function haversineKm(lat1, lon1, lat2, lon2) {
-  const R = 6371;
-  const dLat = ((lat2 - lat1) * Math.PI) / 180;
-  const dLon = ((lon2 - lon1) * Math.PI) / 180;
-  const a =
-    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos((lat1 * Math.PI) / 180) *
-      Math.cos((lat2 * Math.PI) / 180) *
-      Math.sin(dLon / 2) *
-      Math.sin(dLon / 2);
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  return R * c;
-}
-
 const styles = {
-  wrap: { position: "relative", width: "100vw", height: "100vh", overflow: "hidden", background: "#e5e7eb" },
-  mapCanvas: { width: "100%", height: "100%" },
+  wrap: {
+    position: "fixed",
+    inset: 0,
+    width: "100dvw",
+    height: "100dvh",
+    overflow: "hidden",
+    background: C.bg,
+    touchAction: "pan-x pan-y",
+    WebkitOverflowScrolling: "touch",
+  },
 
-  topBar: { position: "absolute", top: 12, left: 12, right: 12, zIndex: 9999 },
+  mapCanvas: {
+    position: "absolute",
+    inset: 0,
+    width: "100%",
+    height: "100%",
+  },
+
+  topBar: {
+    position: "absolute",
+    top: "max(12px, env(safe-area-inset-top))",
+    left: "max(12px, env(safe-area-inset-left))",
+    right: "max(12px, env(safe-area-inset-right))",
+    zIndex: 9999,
+    display: "grid",
+    gap: 10,
+  },
+
   searchForm: {
     display: "flex",
-    background: "rgba(255,255,255,0.92)",
-    border: "1px solid rgba(15,23,42,0.08)",
+    alignItems: "center",
+    background: C.card,
+    border: `1px solid ${C.line}`,
     borderRadius: 18,
     overflow: "hidden",
     backdropFilter: "blur(12px)",
     WebkitBackdropFilter: "blur(12px)",
     boxShadow: "0 10px 26px rgba(15,23,42,0.10)",
   },
-  searchInput: { flex: 1, border: "none", outline: "none", padding: "12px 14px", fontSize: 16, background: "transparent" },
-  searchBtn: { border: "none", background: "transparent", padding: "0 14px", fontSize: 18, cursor: "pointer" },
 
-  loading: { position: "absolute", inset: 0, display: "grid", placeItems: "center", zIndex: 9998, pointerEvents: "none" },
+  searchIcon: { display: "grid", placeItems: "center", width: 44, color: C.sub },
+
+  searchInput: {
+    flex: 1,
+    border: "none",
+    outline: "none",
+    padding: "12px 2px",
+    fontSize: 16,
+    background: "transparent",
+    color: C.text,
+    fontWeight: 700,
+    minWidth: 0,
+  },
+
+  searchBtn: {
+    border: "none",
+    background: C.text,
+    color: "#fff",
+    padding: "0 16px",
+    height: 42,
+    marginRight: 6,
+    borderRadius: 14,
+    cursor: "pointer",
+    fontWeight: 900,
+  },
+
+  infoPills: { display: "flex", gap: 8, flexWrap: "wrap" },
+
+  pill: {
+    height: 36,
+    padding: "0 12px",
+    borderRadius: 999,
+    border: `1px solid ${C.line}`,
+    background: C.card,
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 8,
+    color: C.text,
+    boxShadow: "0 10px 26px rgba(15,23,42,0.08)",
+    fontWeight: 800,
+    fontSize: 12,
+  },
+
+  loading: {
+    position: "absolute",
+    inset: 0,
+    display: "grid",
+    placeItems: "center",
+    zIndex: 9998,
+    pointerEvents: "none",
+  },
+
   loadingCard: {
-    background: "rgba(255,255,255,0.92)",
-    border: "1px solid rgba(15,23,42,0.08)",
+    background: C.card,
+    border: `1px solid ${C.line}`,
     borderRadius: 18,
     padding: "14px 16px",
     boxShadow: "0 10px 26px rgba(15,23,42,0.10)",
@@ -668,30 +1370,66 @@ const styles = {
     WebkitBackdropFilter: "blur(12px)",
   },
 
-  fabs: { position: "absolute", right: 14, bottom: 92, display: "flex", flexDirection: "column", gap: 10, zIndex: 9999 },
-  fab: {
-    width: 54,
-    height: 54,
-    borderRadius: 18,
-    border: "1px solid rgba(15,23,42,0.10)",
-    background: "rgba(255,255,255,0.92)",
-    boxShadow: "0 10px 26px rgba(15,23,42,0.12)",
-    cursor: "pointer",
-    fontSize: 22,
+  rightControls: {
+    position: "absolute",
+    right: "max(14px, env(safe-area-inset-right))",
+    top: "max(120px, calc(env(safe-area-inset-top) + 108px))",
+    display: "flex",
+    flexDirection: "column",
+    gap: 10,
+    zIndex: 9999,
   },
 
-  // tank
+  ctrlBtn: {
+    width: 50,
+    height: 50,
+    borderRadius: 16,
+    border: `1px solid ${C.line}`,
+    background: C.card,
+    boxShadow: "0 10px 26px rgba(15,23,42,0.12)",
+    cursor: "pointer",
+    display: "grid",
+    placeItems: "center",
+  },
+
+  poiControls: {
+    position: "absolute",
+    right: "max(14px, env(safe-area-inset-right))",
+    top: "max(360px, calc(env(safe-area-inset-top) + 348px))",
+    display: "flex",
+    flexDirection: "column",
+    gap: 10,
+    zIndex: 9999,
+  },
+
+  poiBtn: {
+    width: 50,
+    height: 50,
+    borderRadius: 16,
+    border: `1px solid ${C.line}`,
+    background: "rgba(255,255,255,0.84)",
+    boxShadow: "0 10px 26px rgba(15,23,42,0.10)",
+    cursor: "pointer",
+    display: "grid",
+    placeItems: "center",
+  },
+
+  poiBtnActive: {
+    background: "#FFFFFF",
+    boxShadow: "0 10px 26px rgba(0,122,255,0.18)",
+  },
+
   tankWrap: {
     position: "absolute",
     left: 12,
-    top: "35%",
+    top: "36%",
     transform: "translateY(-50%)",
     zIndex: 9999,
     width: 42,
     padding: "10px 8px",
     borderRadius: 18,
-    background: "rgba(255,255,255,0.92)",
-    border: "1px solid rgba(15,23,42,0.08)",
+    background: C.card,
+    border: `1px solid ${C.line}`,
     boxShadow: "0 10px 26px rgba(15,23,42,0.12)",
     backdropFilter: "blur(12px)",
     WebkitBackdropFilter: "blur(12px)",
@@ -702,21 +1440,25 @@ const styles = {
     cursor: "pointer",
     userSelect: "none",
   },
-  tankLabelTop: { fontSize: 10, fontWeight: 900, color: "#0f172a", opacity: 0.7 },
-  tankLabelBottom: { fontSize: 10, fontWeight: 900, color: "#0f172a", opacity: 0.7 },
+
+  tankLabelTop: { fontSize: 10, fontWeight: 900, color: C.text, opacity: 0.7 },
+  tankLabelBottom: { fontSize: 10, fontWeight: 900, color: C.text, opacity: 0.7 },
+
   dotsCol: { display: "flex", flexDirection: "column", gap: 5 },
+
   dot: {
     width: 10,
     height: 10,
     borderRadius: 999,
-    background: "#16a34a",
+    background: C.success,
   },
+
   litersToast: {
     position: "absolute",
     left: 48,
     top: "50%",
     transform: "translateY(-50%)",
-    background: "rgba(15,23,42,0.92)",
+    background: "rgba(15,23,42,0.94)",
     color: "#fff",
     borderRadius: 14,
     padding: "10px 12px",
@@ -725,42 +1467,97 @@ const styles = {
     textAlign: "center",
   },
 
-  // bottom sheet
   sheet: {
     position: "absolute",
-    left: 12,
-    right: 12,
-    bottom: 84, // acima do BottomMenu
+    left: "max(12px, env(safe-area-inset-left))",
+    right: "max(12px, env(safe-area-inset-right))",
+    bottom: "max(84px, calc(env(safe-area-inset-bottom) + 72px))",
     zIndex: 9999,
     borderRadius: 22,
     padding: 14,
-    background: "rgba(255,255,255,0.94)",
-    border: "1px solid rgba(15,23,42,0.08)",
+    background: "rgba(255,255,255,0.95)",
+    border: `1px solid ${C.line}`,
     boxShadow: "0 18px 50px rgba(15,23,42,0.18)",
     backdropFilter: "blur(18px)",
     WebkitBackdropFilter: "blur(18px)",
   },
-  sheetHandle: { width: 48, height: 5, borderRadius: 999, background: "rgba(15,23,42,0.14)", margin: "0 auto 10px" },
-  sheetTitle: { fontSize: 12, fontWeight: 900, letterSpacing: 0.5, color: "#64748b" },
-  sheetSub: { fontSize: 14, fontWeight: 900, color: "#0f172a", marginTop: 2 },
-  closeBtn: { border: "none", background: "transparent", cursor: "pointer", fontSize: 18, opacity: 0.65 },
 
-  metricsRow: { marginTop: 10, display: "grid", gridTemplateColumns: "1fr 1fr 1.4fr", gap: 10 },
+  dragHandleWrap: {
+    marginBottom: 10,
+    cursor: "grab",
+  },
+
+  sheetHandle: {
+    width: 52,
+    height: 5,
+    borderRadius: 999,
+    background: "rgba(15,23,42,0.14)",
+    margin: "0 auto 8px",
+  },
+
+  dragLabel: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    fontSize: 12,
+    color: C.sub,
+    fontWeight: 800,
+  },
+
+  sheetTitle: { fontSize: 12, fontWeight: 900, letterSpacing: 0.5, color: C.sub },
+  sheetSub: { fontSize: 14, fontWeight: 900, color: C.text, marginTop: 2 },
+
+  modeTabs: { display: "flex", gap: 6, flexShrink: 0 },
+
+  modeBtn: {
+    height: 32,
+    padding: "0 10px",
+    borderRadius: 12,
+    border: `1px solid ${C.line}`,
+    background: "transparent",
+    color: C.sub,
+    cursor: "pointer",
+    fontWeight: 800,
+    fontSize: 12,
+  },
+
+  modeBtnActive: {
+    background: C.text,
+    color: "#fff",
+  },
+
+  metricsRow: { marginTop: 10, display: "grid", gridTemplateColumns: "1fr 1fr 1.25fr", gap: 10 },
+
   metric: {
     borderRadius: 16,
     padding: 10,
     background: "rgba(248,250,252,0.9)",
     border: "1px solid rgba(15,23,42,0.06)",
   },
+
   metricStrong: {
     borderRadius: 16,
     padding: 10,
-    background: "rgba(34,197,94,0.10)",
-    border: "1px solid rgba(34,197,94,0.20)",
+    background: "rgba(0,122,255,0.10)",
+    border: "1px solid rgba(0,122,255,0.18)",
   },
-  metricK: { fontSize: 10, fontWeight: 900, color: "#64748b", letterSpacing: 0.7 },
-  metricV: { display: "block", marginTop: 4, fontSize: 14, fontWeight: 900, color: "#0f172a" },
-  metricBig: { display: "block", marginTop: 2, fontSize: 18, fontWeight: 1000, color: "#16a34a" },
+
+  metricK: { fontSize: 10, fontWeight: 900, color: C.sub, letterSpacing: 0.7 },
+  metricV: { display: "block", marginTop: 4, fontSize: 14, fontWeight: 900, color: C.text },
+  metricBig: { display: "block", marginTop: 2, fontSize: 18, fontWeight: 1000, color: C.accent },
+
+  routeDetails: { marginTop: 10, display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 },
+
+  detailItem: {
+    borderRadius: 14,
+    border: "1px solid rgba(15,23,42,0.06)",
+    background: "rgba(248,250,252,0.9)",
+    padding: "10px 12px",
+  },
+
+  detailLabel: { fontSize: 11, color: C.sub, fontWeight: 800 },
+  detailValue: { marginTop: 4, fontSize: 14, color: C.text, fontWeight: 1000 },
 
   moneyCard: {
     marginTop: 10,
@@ -777,5 +1574,27 @@ const styles = {
     color: "#fff",
     fontWeight: 1000,
     cursor: "pointer",
+    display: "inline-flex",
+    alignItems: "center",
   },
+
+  warningBox: {
+    marginTop: 10,
+    padding: "8px 10px",
+    borderRadius: 12,
+    background: "rgba(239,68,68,.12)",
+    color: "#991b1b",
+    fontWeight: 800,
+  },
+
+  navBanner: {
+    marginTop: 10,
+    borderRadius: 16,
+    padding: 12,
+    background: "rgba(0,122,255,0.08)",
+    border: "1px solid rgba(0,122,255,0.16)",
+  },
+
+  navBannerTitle: { fontSize: 13, color: C.text, fontWeight: 1000 },
+  navBannerSub: { marginTop: 4, fontSize: 12, color: C.sub, fontWeight: 700 },
 };
