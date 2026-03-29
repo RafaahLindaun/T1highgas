@@ -9,17 +9,21 @@ const ROUTE_MODE_KEY = "@EcoRoute:RouteMode:v1";
 const VISITED_KEY = "@EcoRoute:VisitedRoads:v1";
 
 const C = {
-  bg: "#E9EEF5",
-  card: "rgba(255,255,255,0.76)",
-  cardStrong: "rgba(255,255,255,0.90)",
-  line: "rgba(255,255,255,0.55)",
+  bg: "#E8EDF5",
+  glass: "rgba(255,255,255,0.78)",
+  glassStrong: "rgba(255,255,255,0.90)",
+  line: "rgba(255,255,255,0.58)",
   lineDark: "rgba(15,23,42,0.10)",
   text: "#0F172A",
   sub: "#64748B",
-  accent: "#007AFF",
+  accent: "#0A84FF",
+  accentSoft: "rgba(10,132,255,0.12)",
   success: "#16A34A",
   danger: "#EF4444",
-  dark: "#111827",
+  dark: "#0F172A",
+  route: "#0A84FF",
+  routeAlt: "rgba(15,23,42,0.28)",
+  roadVisited: "#F8FAFC",
 };
 
 function readJSON(key, fallback) {
@@ -58,10 +62,12 @@ function loadLeaflet() {
           resolve(window.L);
         }
       }, 50);
+
       setTimeout(() => {
         clearInterval(t);
         reject(new Error("Leaflet demorou para carregar."));
       }, 8000);
+
       return;
     }
 
@@ -110,8 +116,7 @@ function haversineKm(lat1, lon1, lat2, lon2) {
       Math.cos((lat2 * Math.PI) / 180) *
       Math.sin(dLon / 2) *
       Math.sin(dLon / 2);
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  return R * c;
+  return 2 * R * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
 function bearingDeg(lat1, lon1, lat2, lon2) {
@@ -120,7 +125,9 @@ function bearingDeg(lat1, lon1, lat2, lon2) {
   const λ1 = (lon1 * Math.PI) / 180;
   const λ2 = (lon2 * Math.PI) / 180;
   const y = Math.sin(λ2 - λ1) * Math.cos(φ2);
-  const x = Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(λ2 - λ1);
+  const x =
+    Math.cos(φ1) * Math.sin(φ2) -
+    Math.sin(φ1) * Math.cos(φ2) * Math.cos(λ2 - λ1);
   const θ = Math.atan2(y, x);
   return ((θ * 180) / Math.PI + 360) % 360;
 }
@@ -132,6 +139,7 @@ function parseCoordinates(input) {
 
   const a = Number(match[1]);
   const b = Number(match[2]);
+
   if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
 
   if (Math.abs(a) <= 90 && Math.abs(b) <= 180) {
@@ -154,12 +162,15 @@ function sampleRoutePoints(coords, max = 28) {
   if (!coords?.length) return [];
   const step = Math.max(1, Math.floor(coords.length / max));
   const out = [];
+
   for (let i = 0; i < coords.length; i += step) {
     const [lon, lat] = coords[i];
     out.push({ lat, lon });
   }
+
   const last = coords[coords.length - 1];
   if (last) out.push({ lat: last[1], lon: last[0] });
+
   return out.slice(0, max);
 }
 
@@ -167,10 +178,14 @@ async function estimateAscentM(samplePoints) {
   try {
     const pts = sampleRoutePoints(samplePoints, 30);
     const locations = pts.map((p) => `${p.lat},${p.lon}`).join("|");
-    const url = `https://api.opentopodata.org/v1/srtm90m?locations=${encodeURIComponent(locations)}`;
+    const url = `https://api.opentopodata.org/v1/srtm90m?locations=${encodeURIComponent(
+      locations
+    )}`;
+
     const res = await fetch(url);
     const data = await res.json();
     const results = data?.results;
+
     if (!Array.isArray(results) || results.length < 2) return null;
 
     let ascent = 0;
@@ -182,6 +197,7 @@ async function estimateAscentM(samplePoints) {
         if (diff > 0) ascent += diff;
       }
     }
+
     return ascent;
   } catch {
     return null;
@@ -208,6 +224,7 @@ function distancePointToSegmentMeters(p, a, b) {
 
   const x = A.x + ABx * t;
   const y = A.y + ABy * t;
+
   return Math.hypot(P.x - x, P.y - y);
 }
 
@@ -220,7 +237,10 @@ function countPoiNearRoute(routeCoords, pois, thresholdMeters = 120) {
     for (let i = 1; i < routeCoords.length; i++) {
       const a = { lat: routeCoords[i - 1][1], lon: routeCoords[i - 1][0] };
       const b = { lat: routeCoords[i][1], lon: routeCoords[i][0] };
-      if (distancePointToSegmentMeters({ lat: poi.lat, lon: poi.lon }, a, b) <= thresholdMeters) {
+      if (
+        distancePointToSegmentMeters({ lat: poi.lat, lon: poi.lon }, a, b) <=
+        thresholdMeters
+      ) {
         hit = true;
         break;
       }
@@ -238,7 +258,9 @@ async function geocodeOne(query) {
   const q = String(query || "").trim();
   if (!q) return null;
 
-  const url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(q)}`;
+  const url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(
+    q
+  )}`;
   const res = await fetch(url, {
     headers: { "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8" },
   });
@@ -383,18 +405,28 @@ function iconSvg(type) {
   const common =
     'width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#0F172A" stroke-width="2.35" stroke-linecap="round" stroke-linejoin="round"';
 
-  if (type === "search") return `<svg ${common}><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path></svg>`;
-  if (type === "locate") return `<svg ${common}><circle cx="12" cy="12" r="3"></circle><path d="M12 2v3"></path><path d="M12 19v3"></path><path d="M2 12h3"></path><path d="M19 12h3"></path></svg>`;
-  if (type === "plus") return `<svg ${common}><path d="M12 5v14"></path><path d="M5 12h14"></path></svg>`;
-  if (type === "minus") return `<svg ${common}><path d="M5 12h14"></path></svg>`;
-  if (type === "compass") return `<svg ${common}><circle cx="12" cy="12" r="9"></circle><path d="m15.5 8.5-2.4 6.4-4.6 1.6 2.4-6.4 4.6-1.6Z"></path></svg>`;
-  if (type === "camera") return `<svg ${common}><rect x="4" y="7" width="16" height="12" rx="2"></rect><path d="M9 7 10.5 5h3L15 7"></path><circle cx="12" cy="13" r="3"></circle></svg>`;
-  if (type === "toll") return `<svg ${common}><path d="M4 20V10l4-4 4 4v10"></path><path d="M12 20V8l4-4 4 4v12"></path></svg>`;
-  if (type === "fuel") return `<svg ${common}><path d="M8 20h8"></path><path d="M9 20V6a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v14"></path><path d="M15 8h2.5a1.5 1.5 0 0 1 1.5 1.5V16a1.5 1.5 0 0 0 1.5 1.5H21"></path></svg>`;
-  if (type === "route") return `<svg ${common}><circle cx="6" cy="18" r="2"></circle><path d="M8 18h7a4 4 0 1 0 0-8H9a4 4 0 1 1 0-8h8"></path><circle cx="18" cy="2" r="2"></circle></svg>`;
-  if (type === "start") return `<svg ${common}><path d="M8 5l10 7-10 7V5Z"></path></svg>`;
-  if (type === "stop") return `<svg ${common}><rect x="7" y="7" width="10" height="10" rx="1"></rect></svg>`;
-  if (type === "sheet") return `<svg ${common}><path d="M12 3v18"></path><path d="m6 9 6-6 6 6"></path></svg>`;
+  if (type === "search")
+    return `<svg ${common}><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path></svg>`;
+  if (type === "locate")
+    return `<svg ${common}><circle cx="12" cy="12" r="3"></circle><path d="M12 2v3"></path><path d="M12 19v3"></path><path d="M2 12h3"></path><path d="M19 12h3"></path></svg>`;
+  if (type === "plus")
+    return `<svg ${common}><path d="M12 5v14"></path><path d="M5 12h14"></path></svg>`;
+  if (type === "minus")
+    return `<svg ${common}><path d="M5 12h14"></path></svg>`;
+  if (type === "compass")
+    return `<svg ${common}><circle cx="12" cy="12" r="9"></circle><path d="m15.5 8.5-2.4 6.4-4.6 1.6 2.4-6.4 4.6-1.6Z"></path></svg>`;
+  if (type === "camera")
+    return `<svg ${common}><rect x="4" y="7" width="16" height="12" rx="2"></rect><path d="M9 7 10.5 5h3L15 7"></path><circle cx="12" cy="13" r="3"></circle></svg>`;
+  if (type === "toll")
+    return `<svg ${common}><path d="M4 20V10l4-4 4 4v10"></path><path d="M12 20V8l4-4 4 4v12"></path></svg>`;
+  if (type === "fuel")
+    return `<svg ${common}><path d="M8 20h8"></path><path d="M9 20V6a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v14"></path><path d="M15 8h2.5a1.5 1.5 0 0 1 1.5 1.5V16a1.5 1.5 0 0 0 1.5 1.5H21"></path></svg>`;
+  if (type === "start")
+    return `<svg ${common}><path d="M8 5l10 7-10 7V5Z"></path></svg>`;
+  if (type === "stop")
+    return `<svg ${common}><rect x="7" y="7" width="10" height="10" rx="1"></rect></svg>`;
+  if (type === "sheet")
+    return `<svg ${common}><path d="M12 3v18"></path><path d="m6 9 6-6 6 6"></path></svg>`;
   return `<svg ${common}><circle cx="12" cy="12" r="9"></circle></svg>`;
 }
 
@@ -437,6 +469,7 @@ export default function MapaGPS() {
     L: null,
     map: null,
     userMarker: null,
+    userHeadingMarker: null,
     destMarker: null,
     routeLayer: null,
     altRouteLayer: null,
@@ -449,29 +482,24 @@ export default function MapaGPS() {
   const lastPanAtRef = useRef(0);
   const lastStableGpsRef = useRef(null);
   const lastHeadingRef = useRef(0);
+  const clickTimer = useRef(null);
 
   const [ready, setReady] = useState(false);
   const [busy, setBusy] = useState({ map: true, route: false, pois: false });
-
   const [search, setSearch] = useState("");
   const [gps, setGps] = useState({ lat: null, lon: null, heading: 0 });
   const [routeMode, setRouteMode] = useState(getRouteMode);
   const [routeAlternatives, setRouteAlternatives] = useState([]);
   const [activeRouteIndex, setActiveRouteIndex] = useState(0);
-
   const [showSearchBar, setShowSearchBar] = useState(true);
   const [sheetOpen, setSheetOpen] = useState(false);
   const [tripActive, setTripActive] = useState(false);
   const [navMode, setNavMode] = useState(false);
-
   const [tank, setTank] = useState(() => readTank());
   const [showLitersToast, setShowLitersToast] = useState(false);
   const [visitedPoints, setVisitedPoints] = useState(() => readVisited());
-
   const [poiData, setPoiData] = useState({ fuel: [], camera: [], toll: [] });
   const [poiVisible, setPoiVisible] = useState({ fuel: true, camera: true, toll: true });
-
-  const clickTimer = useRef(null);
 
   useEffect(() => {
     writeTank(tank);
@@ -515,15 +543,46 @@ export default function MapaGPS() {
     const layer = L.polyline(
       visitedPoints.map((p) => [p.lat, p.lon]),
       {
-        color: "#F8FAFC",
+        color: C.roadVisited,
         weight: 5,
-        opacity: 0.92,
+        opacity: 0.94,
         lineCap: "round",
         lineJoin: "round",
       }
     ).addTo(map);
 
     leafletRef.current.passedLayer = layer;
+  }
+
+  function renderUserMarker(L, heading = 0) {
+    return L.divIcon({
+      className: "eco-user-heading",
+      html: `
+        <div style="position:relative;width:44px;height:44px;display:grid;place-items:center;">
+          <div style="
+            position:absolute;
+            top:4px;
+            width:0;height:0;
+            border-left:7px solid transparent;
+            border-right:7px solid transparent;
+            border-bottom:14px solid ${C.accent};
+            transform: rotate(${heading}deg);
+            transform-origin: center 18px;
+            filter: drop-shadow(0 8px 10px rgba(10,132,255,.25));
+          "></div>
+          <div style="
+            width:18px;height:18px;border-radius:999px;
+            background:${C.accent};
+            border:4px solid #fff;
+            box-shadow:0 14px 28px rgba(15,23,42,.18);
+            position:absolute;
+            z-index:2;
+          "></div>
+        </div>
+      `,
+      iconSize: [44, 44],
+      iconAnchor: [22, 22],
+    });
   }
 
   function updateThirdPersonCamera(pos) {
@@ -533,12 +592,9 @@ export default function MapaGPS() {
     const latlng = [pos.lat, pos.lon];
     const p = map.project(latlng, map.getZoom());
 
-    const centerPoint = {
-      x: p.x,
-      y: p.y + 145,
-    };
-
+    const centerPoint = { x: p.x, y: p.y + 170 };
     const center = map.unproject(centerPoint, map.getZoom());
+
     map.setView(center, Math.max(map.getZoom(), 17), { animate: true });
   }
 
@@ -615,19 +671,14 @@ export default function MapaGPS() {
           maxZoom: 18,
         }).addTo(map);
 
-        const userIcon = L.divIcon({
-          className: "eco-user",
-          html: `<div style="width:18px;height:18px;border-radius:999px;background:${C.accent};border:4px solid #fff;box-shadow:0 14px 28px rgba(15,23,42,.18)"></div>`,
-          iconSize: [26, 26],
-          iconAnchor: [13, 13],
-        });
-
-        const userMarker = L.marker([DEFAULT_CENTER.lat, DEFAULT_CENTER.lon], { icon: userIcon }).addTo(map);
+        const userMarker = L.marker(
+          [DEFAULT_CENTER.lat, DEFAULT_CENTER.lon],
+          { icon: renderUserMarker(L, 0) }
+        ).addTo(map);
 
         map.on("click", (e) => {
           const { lat, lng } = e.latlng;
-          const dest = { lat, lon: lng, label: "Destino selecionado no mapa" };
-          setDestination(dest);
+          setDestination({ lat, lon: lng, label: "Destino selecionado no mapa" });
         });
 
         leafletRef.current.map = map;
@@ -636,9 +687,7 @@ export default function MapaGPS() {
         setTimeout(() => map.invalidateSize(), 250);
 
         resizeMap = () => {
-          setTimeout(() => {
-            map.invalidateSize();
-          }, 120);
+          setTimeout(() => map.invalidateSize(), 120);
         };
 
         window.addEventListener("resize", resizeMap);
@@ -673,6 +722,7 @@ export default function MapaGPS() {
 
               const ll = [latitude, longitude];
               userMarker.setLatLng(ll);
+              userMarker.setIcon(renderUserMarker(L, computedHeading));
 
               if (tripActive && prev) {
                 const dKm = haversineKm(prev.lat, prev.lon, latitude, longitude);
@@ -724,15 +774,21 @@ export default function MapaGPS() {
     return () => {
       mounted = false;
       const { map, watchId } = leafletRef.current;
-      if (watchId != null && "geolocation" in navigator) navigator.geolocation.clearWatch(watchId);
+
+      if (watchId != null && "geolocation" in navigator) {
+        navigator.geolocation.clearWatch(watchId);
+      }
+
       if (resizeMap) {
         window.removeEventListener("resize", resizeMap);
         window.removeEventListener("orientationchange", resizeMap);
       }
+
       if (map) {
         map.off();
         map.remove();
       }
+
       leafletRef.current.map = null;
     };
   }, [tripActive, navMode, vehicle?.consumption, setDestination]);
@@ -748,9 +804,9 @@ export default function MapaGPS() {
 
     const destIcon = L.divIcon({
       className: "eco-dest",
-      html: `<div style="width:18px;height:18px;border-radius:999px;background:#111827;border:4px solid #fff;box-shadow:0 14px 28px rgba(15,23,42,.18)"></div>`,
-      iconSize: [26, 26],
-      iconAnchor: [13, 13],
+      html: `<div style="width:20px;height:20px;border-radius:999px;background:#111827;border:4px solid #fff;box-shadow:0 14px 28px rgba(15,23,42,.18)"></div>`,
+      iconSize: [28, 28],
+      iconAnchor: [14, 14],
     });
 
     leafletRef.current.destMarker = L.marker([destination.lat, destination.lon], { icon: destIcon })
@@ -774,6 +830,7 @@ export default function MapaGPS() {
       map.removeLayer(leafletRef.current.routeLayer);
       leafletRef.current.routeLayer = null;
     }
+
     if (leafletRef.current.altRouteLayer) {
       map.removeLayer(leafletRef.current.altRouteLayer);
       leafletRef.current.altRouteLayer = null;
@@ -818,7 +875,11 @@ export default function MapaGPS() {
           return ascent;
         })
       );
-      alternatives = alternatives.map((alt, i) => ({ ...alt, ascentM: ascentResults[i] }));
+
+      alternatives = alternatives.map((alt, i) => ({
+        ...alt,
+        ascentM: ascentResults[i],
+      }));
     } catch {}
 
     const [fuel, camera, toll] = await Promise.all([
@@ -826,6 +887,7 @@ export default function MapaGPS() {
       fetchSpeedCamerasAround((from.lat + to.lat) / 2, (from.lon + to.lon) / 2, 7000).catch(() => []),
       fetchTollsAround((from.lat + to.lat) / 2, (from.lon + to.lon) / 2, 10000).catch(() => []),
     ]);
+
     setPoiData({ fuel, camera, toll });
 
     alternatives = alternatives.map((alt) => ({
@@ -844,7 +906,9 @@ export default function MapaGPS() {
 
       let score = liters + ascentPenalty + tollPenalty + speedPenalty;
       if (routeMode === "fast") score = timeH + speedPenalty * 0.25;
-      if (routeMode === "balanced") score = liters * 0.75 + ascentPenalty + tollPenalty * 0.5 + timeH * 0.25;
+      if (routeMode === "balanced") {
+        score = liters * 0.75 + ascentPenalty + tollPenalty * 0.5 + timeH * 0.25;
+      }
 
       return { ...alt, score };
     });
@@ -879,12 +943,12 @@ export default function MapaGPS() {
 
     const bestLatLngs = best.routeCoords.map(([lon, lat]) => [lat, lon]);
     const mainLine = L.polyline(bestLatLngs, {
-      color: C.accent,
-      weight: 7,
-      opacity: 0.95,
+      color: C.route,
+      weight: 8,
+      opacity: 0.98,
       lineCap: "round",
       lineJoin: "round",
-      dashArray: "14 10",
+      dashArray: "12 10",
     }).addTo(map);
 
     leafletRef.current.routeLayer = mainLine;
@@ -893,12 +957,14 @@ export default function MapaGPS() {
       const altIdx = bestIdx === 0 ? 1 : 0;
       const alt = alternatives[altIdx];
       const altLatLngs = alt.routeCoords.map(([lon, lat]) => [lat, lon]);
+
       const altLine = L.polyline(altLatLngs, {
         color: "#111827",
         weight: 5,
-        opacity: 0.28,
+        opacity: 0.26,
         dashArray: "10 12",
       }).addTo(map);
+
       leafletRef.current.altRouteLayer = altLine;
     }
 
@@ -1026,24 +1092,36 @@ export default function MapaGPS() {
   return (
     <div style={styles.wrap}>
       {showSearchBar && (
-        <div style={styles.topBar}>
-          <form onSubmit={handleSearch} style={styles.searchForm}>
-            <div style={styles.searchIcon}>{uiIcon("search", 18)}</div>
-            <input
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Buscar por CEP, endereço ou coordenada"
-              style={styles.searchInput}
-            />
-            <button type="submit" style={styles.searchBtn}>
-              {busy.route ? "..." : "Ir"}
-            </button>
-          </form>
+        <div style={styles.topShell}>
+          <div style={styles.searchRow}>
+            <form onSubmit={handleSearch} style={styles.searchForm}>
+              <div style={styles.searchIcon}>{uiIcon("search", 18)}</div>
+              <input
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Para onde você quer ir?"
+                style={styles.searchInput}
+              />
+            </form>
 
-          <div style={styles.infoPills}>
-            <div style={styles.pill}>{uiIcon("camera", 14)}<span>{activeStats.cameras}</span></div>
-            <div style={styles.pill}>{uiIcon("toll", 14)}<span>{activeStats.tolls}</span></div>
-            <div style={styles.pill}>{uiIcon("fuel", 14)}<span>{activeStats.fuel}</span></div>
+            <button type="button" onClick={handleSearch} style={styles.goButton}>
+              Ir
+            </button>
+          </div>
+
+          <div style={styles.chipsRow}>
+            <div style={styles.chip}>
+              {uiIcon("camera", 14)}
+              <span>{activeStats.cameras}</span>
+            </div>
+            <div style={styles.chip}>
+              {uiIcon("toll", 14)}
+              <span>{activeStats.tolls}</span>
+            </div>
+            <div style={styles.chip}>
+              {uiIcon("fuel", 14)}
+              <span>{activeStats.fuel}</span>
+            </div>
           </div>
         </div>
       )}
@@ -1059,115 +1137,122 @@ export default function MapaGPS() {
         </div>
       )}
 
-      <div style={styles.rightControls}>
-        <button style={styles.ctrlBtn} onClick={zoomIn} title="Aproximar">
+      {!tripActive && (
+        <div style={styles.sideLeft}>
+          <button type="button" style={styles.sideBubble} onClick={onTankClick}>
+            <div style={styles.tankTitle}>F</div>
+            <div style={styles.tankDots}>
+              {Array.from({ length: 12 }).map((_, i) => {
+                const levelIndex = 11 - i;
+                const filledDots = Math.round(percent * 12);
+                const filled = levelIndex < filledDots;
+
+                return (
+                  <div
+                    key={i}
+                    style={{
+                      ...styles.tankDot,
+                      opacity: filled ? 1 : 0.18,
+                    }}
+                  />
+                );
+              })}
+            </div>
+            <div style={styles.tankTitle}>E</div>
+          </button>
+
+          <AnimatePresence>
+            {showLitersToast && (
+              <motion.div
+                initial={{ opacity: 0, x: -8, scale: 0.98 }}
+                animate={{ opacity: 1, x: 0, scale: 1 }}
+                exit={{ opacity: 0, x: -8, scale: 0.98 }}
+                transition={{ duration: 0.16 }}
+                style={styles.litersToast}
+              >
+                <b style={{ fontSize: 14 }}>{tank.levelL.toFixed(1)} L</b>
+                <div style={{ fontSize: 11, opacity: 0.75 }}>
+                  {Math.round(percent * 100)}%
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </div>
+      )}
+
+      <div style={styles.sideRightTop}>
+        <button type="button" style={styles.fab} onClick={zoomIn}>
           {uiIcon("plus", 18)}
         </button>
-        <button style={styles.ctrlBtn} onClick={zoomOut} title="Afastar">
+        <button type="button" style={styles.fab} onClick={zoomOut}>
           {uiIcon("minus", 18)}
         </button>
-        <button style={styles.ctrlBtn} onClick={recenter} title="Centralizar">
+      </div>
+
+      <div style={styles.sideRightMid}>
+        <button type="button" style={styles.fab} onClick={recenter}>
           {uiIcon("locate", 18)}
         </button>
-        <button style={styles.ctrlBtn} onClick={alignNorth} title="Norte">
+        <button type="button" style={styles.fab} onClick={alignNorth}>
           {uiIcon("compass", 18)}
         </button>
       </div>
 
-      <div style={styles.poiControls}>
+      <div style={styles.sideRightBottom}>
         <button
-          style={{ ...styles.poiBtn, ...(poiVisible.camera ? styles.poiBtnActive : null) }}
+          type="button"
+          style={{ ...styles.fabSmall, ...(poiVisible.camera ? styles.fabActive : null) }}
           onClick={() => setPoiVisible((p) => ({ ...p, camera: !p.camera }))}
-          title="Radares"
         >
-          {uiIcon("camera", 16)}
+          {uiIcon("camera", 15)}
         </button>
         <button
-          style={{ ...styles.poiBtn, ...(poiVisible.toll ? styles.poiBtnActive : null) }}
+          type="button"
+          style={{ ...styles.fabSmall, ...(poiVisible.toll ? styles.fabActive : null) }}
           onClick={() => setPoiVisible((p) => ({ ...p, toll: !p.toll }))}
-          title="Pedágios"
         >
-          {uiIcon("toll", 16)}
+          {uiIcon("toll", 15)}
         </button>
         <button
-          style={{ ...styles.poiBtn, ...(poiVisible.fuel ? styles.poiBtnActive : null) }}
+          type="button"
+          style={{ ...styles.fabSmall, ...(poiVisible.fuel ? styles.fabActive : null) }}
           onClick={() => setPoiVisible((p) => ({ ...p, fuel: !p.fuel }))}
-          title="Postos"
         >
-          {uiIcon("fuel", 16)}
+          {uiIcon("fuel", 15)}
         </button>
-      </div>
-
-      <div style={styles.tankWrap} onClick={onTankClick}>
-        <div style={styles.tankLabelTop}>F</div>
-
-        <div style={styles.dotsCol}>
-          {Array.from({ length: 14 }).map((_, i) => {
-            const levelIndex = 13 - i;
-            const filledDots = Math.round(percent * 14);
-            const filled = levelIndex < filledDots;
-
-            return (
-              <div
-                key={i}
-                style={{
-                  ...styles.dot,
-                  opacity: filled ? 1 : 0.22,
-                }}
-              />
-            );
-          })}
-        </div>
-
-        <div style={styles.tankLabelBottom}>E</div>
-
-        <AnimatePresence>
-          {showLitersToast && (
-            <motion.div
-              initial={{ opacity: 0, x: -8, scale: 0.98 }}
-              animate={{ opacity: 1, x: 0, scale: 1 }}
-              exit={{ opacity: 0, x: -8, scale: 0.98 }}
-              transition={{ duration: 0.16 }}
-              style={styles.litersToast}
-            >
-              <b style={{ fontSize: 14 }}>{tank.levelL.toFixed(1)} L</b>
-              <div style={{ fontSize: 11, opacity: 0.75 }}>
-                {Math.round(percent * 100)}%
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
       </div>
 
       <AnimatePresence>
         {sheetOpen && route && (
           <motion.div
-            initial={{ y: 260, opacity: 0 }}
+            initial={{ y: 280, opacity: 0 }}
             animate={{ y: 0, opacity: 1 }}
-            exit={{ y: 260, opacity: 0 }}
+            exit={{ y: 280, opacity: 0 }}
             transition={{ type: "spring", stiffness: 260, damping: 28 }}
             style={styles.sheet}
           >
-            <motion.div
-              drag="y"
-              dragConstraints={{ top: -140, bottom: 0 }}
-              onDragEnd={(_, info) => {
-                if (info.offset.y < -90) startTrip();
-              }}
-              style={styles.dragHandleWrap}
-            >
-              <div style={styles.sheetHandle} />
-              <div style={styles.dragLabel}>
-                {uiIcon("sheet", 14)}
-                <span>Arraste para cima para iniciar</span>
-              </div>
-            </motion.div>
+            {!tripActive && (
+              <motion.div
+                drag="y"
+                dragConstraints={{ top: -140, bottom: 0 }}
+                onDragEnd={(_, info) => {
+                  if (info.offset.y < -90) startTrip();
+                }}
+                style={styles.dragZone}
+              >
+                <div style={styles.sheetHandle} />
+                <div style={styles.dragLabel}>
+                  {uiIcon("sheet", 14)}
+                  <span>Arraste para cima para iniciar</span>
+                </div>
+              </motion.div>
+            )}
 
-            <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+            <div style={styles.sheetHeader}>
               <div style={{ minWidth: 0 }}>
-                <div style={styles.sheetTitle}>Rota</div>
-                <div style={styles.sheetSub}>
-                  {route.to?.label ? truncate(route.to.label, 62) : "Destino"}
+                <div style={styles.sheetTitle}>Destino</div>
+                <div style={styles.sheetSubtitle}>
+                  {route.to?.label ? truncate(route.to.label, 68) : "Destino"}
                 </div>
               </div>
 
@@ -1175,51 +1260,54 @@ export default function MapaGPS() {
                 {["eco", "balanced", "fast"].map((mode) => (
                   <button
                     key={mode}
+                    type="button"
                     onClick={() => setRouteMode(mode)}
                     style={{
                       ...styles.modeBtn,
                       ...(routeMode === mode ? styles.modeBtnActive : null),
                     }}
                   >
-                    {mode === "eco" ? "Eco" : mode === "balanced" ? "Equil." : "Rápida"}
+                    {mode === "eco" ? "Eco" : mode === "balanced" ? "Balanced" : "Fast"}
                   </button>
                 ))}
               </div>
             </div>
 
-            <div style={styles.metricsRow}>
-              <div style={styles.metric}>
-                <span style={styles.metricK}>DIST</span>
-                <b style={styles.metricV}>{formatKm(route.distanceM)}</b>
+            <div style={styles.mainInfoRow}>
+              <div style={styles.mainInfoCard}>
+                <div style={styles.mainInfoLabel}>Distância</div>
+                <div style={styles.mainInfoValue}>{formatKm(route.distanceM)}</div>
               </div>
-              <div style={styles.metric}>
-                <span style={styles.metricK}>TEMPO</span>
-                <b style={styles.metricV}>{formatMin(route.durationS)}</b>
+
+              <div style={styles.mainInfoCard}>
+                <div style={styles.mainInfoLabel}>Tempo</div>
+                <div style={styles.mainInfoValue}>{formatMin(route.durationS)}</div>
               </div>
-              <div style={styles.metricStrong}>
-                <span style={styles.metricK}>LITROS</span>
-                <b style={styles.metricBig}>
-                  {fuelCalc?.liters != null ? fuelCalc.liters.toFixed(2) : "--"} L
-                </b>
+
+              <div style={styles.mainInfoCardStrong}>
+                <div style={styles.mainInfoLabel}>Combustível</div>
+                <div style={styles.mainInfoValueStrong}>
+                  {fuelCalc?.liters != null ? `${fuelCalc.liters.toFixed(2)} L` : "--"}
+                </div>
               </div>
             </div>
 
-            <div style={styles.routeDetails}>
-              <div style={styles.detailItem}>
-                <div style={styles.detailLabel}>Radares</div>
-                <div style={styles.detailValue}>{activeStats.cameras}</div>
+            <div style={styles.secondaryInfoRow}>
+              <div style={styles.secondaryCard}>
+                <div style={styles.secondaryLabel}>Radares</div>
+                <div style={styles.secondaryValue}>{activeStats.cameras}</div>
               </div>
-              <div style={styles.detailItem}>
-                <div style={styles.detailLabel}>Pedágios</div>
-                <div style={styles.detailValue}>{activeStats.tolls}</div>
+              <div style={styles.secondaryCard}>
+                <div style={styles.secondaryLabel}>Pedágios</div>
+                <div style={styles.secondaryValue}>{activeStats.tolls}</div>
               </div>
-              <div style={styles.detailItem}>
-                <div style={styles.detailLabel}>Postos</div>
-                <div style={styles.detailValue}>{activeStats.fuel}</div>
+              <div style={styles.secondaryCard}>
+                <div style={styles.secondaryLabel}>Postos</div>
+                <div style={styles.secondaryValue}>{activeStats.fuel}</div>
               </div>
             </div>
 
-            <div style={styles.moneyCard}>
+            <div style={styles.costBlock}>
               {fuelCalc?.needsVehicle ? (
                 <div>
                   <b style={{ color: C.text }}>Cadastre consumo e preço</b>
@@ -1228,23 +1316,19 @@ export default function MapaGPS() {
                   </div>
                 </div>
               ) : (
-                <div style={{ width: "100%" }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
+                <>
+                  <div style={styles.costHeader}>
                     <div>
-                      <div style={{ fontSize: 12, color: C.sub }}>Custo estimado</div>
-                      <div style={{ fontSize: 18, fontWeight: 900 }}>
-                        R$ {fuelCalc.cost.toFixed(2)}
-                      </div>
+                      <div style={styles.costLabel}>Custo estimado</div>
+                      <div style={styles.costValue}>R$ {fuelCalc.cost.toFixed(2)}</div>
                     </div>
 
                     <div style={{ textAlign: "right" }}>
-                      <div style={{ fontSize: 12, color: C.sub }}>Vantagem</div>
+                      <div style={styles.costLabel}>Vantagem</div>
                       <div
                         style={{
-                          fontSize: 18,
-                          fontWeight: 900,
+                          ...styles.costAdvantage,
                           color: fuelCalc.advantage >= 0 ? C.success : C.danger,
-                          animation: "ecoPulse 1.25s ease-in-out infinite",
                         }}
                       >
                         {fuelCalc.advantage >= 0 ? "+" : "-"} R$ {Math.abs(fuelCalc.advantage).toFixed(2)}
@@ -1252,45 +1336,39 @@ export default function MapaGPS() {
                     </div>
                   </div>
 
-                  <div style={{ marginTop: 12, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+                  <div style={styles.actionRow}>
                     <button
+                      type="button"
                       onClick={() => (tripActive ? stopTrip() : startTrip())}
                       style={{
-                        ...styles.actionBtn,
+                        ...styles.primaryAction,
                         background: tripActive ? C.dark : C.accent,
                       }}
                     >
-                      {tripActive ? (
-                        <>
-                          <span style={{ display: "inline-flex", marginRight: 8 }}>{uiIcon("stop", 14)}</span>
-                          Parar
-                        </>
-                      ) : (
-                        <>
-                          <span style={{ display: "inline-flex", marginRight: 8 }}>{uiIcon("start", 14)}</span>
-                          Iniciar
-                        </>
-                      )}
+                      <span style={{ display: "inline-flex", marginRight: 8 }}>
+                        {uiIcon(tripActive ? "stop" : "start", 14)}
+                      </span>
+                      {tripActive ? "Parar rota" : "Iniciar rota"}
                     </button>
 
-                    <div style={{ fontSize: 12, color: C.sub }}>
-                      Tanque: <b style={{ color: C.text }}>{tank.levelL.toFixed(1)}L</b> / {tank.capacityL.toFixed(0)}L
+                    <div style={styles.tankMeta}>
+                      <b>{tank.levelL.toFixed(1)}L</b> / {tank.capacityL.toFixed(0)}L
                     </div>
                   </div>
 
                   {fuelCalc?.liters != null && tank.levelL < fuelCalc.liters && (
-                    <div style={styles.warningBox}>
-                      Combustível insuficiente para essa rota.
-                    </div>
+                    <div style={styles.warningBox}>Combustível insuficiente para essa rota.</div>
                   )}
-                </div>
+                </>
               )}
             </div>
 
             {tripActive && (
-              <div style={styles.navBanner}>
-                <div style={styles.navBannerTitle}>Navegação ativa</div>
-                <div style={styles.navBannerSub}>Câmera mais estável e contagem em tempo real.</div>
+              <div style={styles.tripBanner}>
+                <div style={styles.tripBannerTitle}>Navegação ativa</div>
+                <div style={styles.tripBannerSub}>
+                  Visão avançada, rota em destaque e consumo em tempo real.
+                </div>
               </div>
             )}
           </motion.div>
@@ -1319,7 +1397,7 @@ const styles = {
     height: "100%",
   },
 
-  topBar: {
+  topShell: {
     position: "absolute",
     top: "max(12px, env(safe-area-inset-top))",
     left: "max(12px, env(safe-area-inset-left))",
@@ -1329,61 +1407,72 @@ const styles = {
     gap: 10,
   },
 
+  searchRow: {
+    display: "grid",
+    gridTemplateColumns: "1fr auto",
+    gap: 10,
+    alignItems: "center",
+  },
+
   searchForm: {
     display: "flex",
     alignItems: "center",
-    background: "rgba(255,255,255,0.76)",
-    border: "1px solid rgba(255,255,255,0.55)",
+    background: C.glass,
+    border: `1px solid ${C.line}`,
     borderRadius: 999,
     overflow: "hidden",
     backdropFilter: "blur(22px)",
     WebkitBackdropFilter: "blur(22px)",
     boxShadow: "0 12px 28px rgba(15,23,42,0.10)",
+    minHeight: 52,
   },
 
   searchIcon: {
+    width: 48,
     display: "grid",
     placeItems: "center",
-    width: 48,
     color: C.sub,
+    flexShrink: 0,
   },
 
   searchInput: {
     flex: 1,
     border: "none",
     outline: "none",
-    padding: "13px 2px",
-    fontSize: 16,
     background: "transparent",
     color: C.text,
+    fontSize: 16,
     fontWeight: 800,
     minWidth: 0,
+    paddingRight: 12,
   },
 
-  searchBtn: {
-    border: "none",
-    background: C.dark,
-    color: "#fff",
+  goButton: {
+    height: 52,
     padding: "0 18px",
-    height: 44,
-    marginRight: 6,
     borderRadius: 999,
-    cursor: "pointer",
+    border: "1px solid rgba(255,255,255,0.58)",
+    background: C.glassStrong,
+    backdropFilter: "blur(20px)",
+    WebkitBackdropFilter: "blur(20px)",
+    color: C.text,
     fontWeight: 900,
+    cursor: "pointer",
+    boxShadow: "0 12px 28px rgba(15,23,42,0.10)",
   },
 
-  infoPills: {
+  chipsRow: {
     display: "flex",
     gap: 8,
     flexWrap: "wrap",
   },
 
-  pill: {
+  chip: {
     height: 38,
     padding: "0 14px",
     borderRadius: 999,
-    border: "1px solid rgba(255,255,255,0.55)",
-    background: "rgba(255,255,255,0.72)",
+    border: `1px solid ${C.line}`,
+    background: C.glass,
     backdropFilter: "blur(18px)",
     WebkitBackdropFilter: "blur(18px)",
     display: "inline-flex",
@@ -1405,7 +1494,7 @@ const styles = {
   },
 
   loadingCard: {
-    background: C.cardStrong,
+    background: C.glassStrong,
     border: `1px solid ${C.lineDark}`,
     borderRadius: 18,
     padding: "14px 16px",
@@ -1414,87 +1503,44 @@ const styles = {
     WebkitBackdropFilter: "blur(12px)",
   },
 
-  rightControls: {
+  sideLeft: {
     position: "absolute",
-    right: "max(14px, env(safe-area-inset-right))",
-    top: "max(120px, calc(env(safe-area-inset-top) + 108px))",
-    display: "flex",
-    flexDirection: "column",
-    gap: 10,
+    left: "max(12px, env(safe-area-inset-left))",
+    top: "33%",
+    transform: "translateY(-50%)",
     zIndex: 9999,
   },
 
-  ctrlBtn: {
-    width: 54,
-    height: 54,
-    borderRadius: 999,
-    border: "1px solid rgba(255,255,255,0.55)",
-    background: "rgba(255,255,255,0.72)",
+  sideBubble: {
+    width: 36,
+    padding: "8px 6px",
+    borderRadius: 18,
+    border: `1px solid ${C.line}`,
+    background: C.glass,
     backdropFilter: "blur(18px)",
     WebkitBackdropFilter: "blur(18px)",
     boxShadow: "0 14px 34px rgba(15,23,42,0.12)",
-    cursor: "pointer",
-    display: "grid",
-    placeItems: "center",
-  },
-
-  poiControls: {
-    position: "absolute",
-    right: "max(14px, env(safe-area-inset-right))",
-    top: "max(360px, calc(env(safe-area-inset-top) + 348px))",
-    display: "flex",
-    flexDirection: "column",
-    gap: 10,
-    zIndex: 9999,
-  },
-
-  poiBtn: {
-    width: 54,
-    height: 54,
-    borderRadius: 999,
-    border: "1px solid rgba(255,255,255,0.55)",
-    background: "rgba(255,255,255,0.70)",
-    backdropFilter: "blur(18px)",
-    WebkitBackdropFilter: "blur(18px)",
-    boxShadow: "0 14px 34px rgba(15,23,42,0.10)",
-    cursor: "pointer",
-    display: "grid",
-    placeItems: "center",
-  },
-
-  poiBtnActive: {
-    background: "rgba(255,255,255,0.88)",
-    boxShadow: "0 14px 34px rgba(0,122,255,0.14)",
-  },
-
-  tankWrap: {
-    position: "absolute",
-    left: 12,
-    top: "34%",
-    transform: "translateY(-50%)",
-    zIndex: 9999,
-    width: 34,
-    padding: "8px 6px",
-    borderRadius: 16,
-    background: C.cardStrong,
-    border: `1px solid ${C.lineDark}`,
-    boxShadow: "0 10px 26px rgba(15,23,42,0.12)",
-    backdropFilter: "blur(12px)",
-    WebkitBackdropFilter: "blur(12px)",
     display: "flex",
     flexDirection: "column",
     alignItems: "center",
     gap: 7,
     cursor: "pointer",
-    userSelect: "none",
   },
 
-  tankLabelTop: { fontSize: 9, fontWeight: 900, color: C.text, opacity: 0.7 },
-  tankLabelBottom: { fontSize: 9, fontWeight: 900, color: C.text, opacity: 0.7 },
+  tankTitle: {
+    fontSize: 9,
+    fontWeight: 900,
+    color: C.text,
+    opacity: 0.72,
+  },
 
-  dotsCol: { display: "flex", flexDirection: "column", gap: 4 },
+  tankDots: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 4,
+  },
 
-  dot: {
+  tankDot: {
     width: 8,
     height: 8,
     borderRadius: 999,
@@ -1515,22 +1561,85 @@ const styles = {
     textAlign: "center",
   },
 
+  sideRightTop: {
+    position: "absolute",
+    right: "max(14px, env(safe-area-inset-right))",
+    top: "max(124px, calc(env(safe-area-inset-top) + 112px))",
+    display: "flex",
+    flexDirection: "column",
+    gap: 10,
+    zIndex: 9999,
+  },
+
+  sideRightMid: {
+    position: "absolute",
+    right: "max(14px, env(safe-area-inset-right))",
+    top: "max(252px, calc(env(safe-area-inset-top) + 240px))",
+    display: "flex",
+    flexDirection: "column",
+    gap: 10,
+    zIndex: 9999,
+  },
+
+  sideRightBottom: {
+    position: "absolute",
+    right: "max(14px, env(safe-area-inset-right))",
+    top: "max(382px, calc(env(safe-area-inset-top) + 370px))",
+    display: "flex",
+    flexDirection: "column",
+    gap: 10,
+    zIndex: 9999,
+  },
+
+  fab: {
+    width: 56,
+    height: 56,
+    borderRadius: 999,
+    border: `1px solid ${C.line}`,
+    background: C.glass,
+    backdropFilter: "blur(18px)",
+    WebkitBackdropFilter: "blur(18px)",
+    boxShadow: "0 14px 34px rgba(15,23,42,0.12)",
+    cursor: "pointer",
+    display: "grid",
+    placeItems: "center",
+  },
+
+  fabSmall: {
+    width: 52,
+    height: 52,
+    borderRadius: 999,
+    border: `1px solid ${C.line}`,
+    background: C.glass,
+    backdropFilter: "blur(18px)",
+    WebkitBackdropFilter: "blur(18px)",
+    boxShadow: "0 14px 34px rgba(15,23,42,0.10)",
+    cursor: "pointer",
+    display: "grid",
+    placeItems: "center",
+  },
+
+  fabActive: {
+    background: C.glassStrong,
+    boxShadow: "0 14px 34px rgba(10,132,255,0.14)",
+  },
+
   sheet: {
     position: "absolute",
     left: "max(12px, env(safe-area-inset-left))",
     right: "max(12px, env(safe-area-inset-right))",
-    bottom: "max(84px, calc(env(safe-area-inset-bottom) + 72px))",
+    bottom: "max(34px, calc(env(safe-area-inset-bottom) + 18px))",
     zIndex: 9999,
-    borderRadius: 24,
+    borderRadius: 26,
     padding: 14,
     background: "rgba(255,255,255,0.86)",
-    border: "1px solid rgba(255,255,255,0.55)",
+    border: `1px solid ${C.line}`,
     boxShadow: "0 18px 50px rgba(15,23,42,0.16)",
     backdropFilter: "blur(24px)",
     WebkitBackdropFilter: "blur(24px)",
   },
 
-  dragHandleWrap: {
+  dragZone: {
     marginBottom: 10,
     cursor: "grab",
   },
@@ -1553,17 +1662,39 @@ const styles = {
     fontWeight: 800,
   },
 
-  sheetTitle: { fontSize: 12, fontWeight: 900, letterSpacing: 0.5, color: C.sub },
-  sheetSub: { fontSize: 14, fontWeight: 900, color: C.text, marginTop: 2 },
+  sheetHeader: {
+    display: "flex",
+    justifyContent: "space-between",
+    gap: 12,
+    alignItems: "flex-start",
+  },
 
-  modeTabs: { display: "flex", gap: 6, flexShrink: 0 },
+  sheetTitle: {
+    fontSize: 12,
+    fontWeight: 900,
+    letterSpacing: 0.5,
+    color: C.sub,
+  },
+
+  sheetSubtitle: {
+    fontSize: 15,
+    fontWeight: 900,
+    color: C.text,
+    marginTop: 2,
+  },
+
+  modeTabs: {
+    display: "flex",
+    gap: 6,
+    flexShrink: 0,
+  },
 
   modeBtn: {
-    height: 32,
-    padding: "0 10px",
-    borderRadius: 12,
+    height: 34,
+    padding: "0 12px",
+    borderRadius: 999,
     border: `1px solid ${C.lineDark}`,
-    background: "rgba(255,255,255,0.58)",
+    background: "rgba(255,255,255,0.60)",
     color: C.sub,
     cursor: "pointer",
     fontWeight: 800,
@@ -1571,53 +1702,80 @@ const styles = {
   },
 
   modeBtnActive: {
-    background: C.text,
+    background: C.dark,
     color: "#fff",
   },
 
-  metricsRow: {
-    marginTop: 10,
+  mainInfoRow: {
+    marginTop: 12,
     display: "grid",
-    gridTemplateColumns: "1fr 1fr 1.25fr",
+    gridTemplateColumns: "1fr 1fr 1.3fr",
     gap: 10,
   },
 
-  metric: {
-    borderRadius: 16,
-    padding: 10,
+  mainInfoCard: {
+    borderRadius: 18,
+    padding: 12,
     background: "rgba(248,250,252,0.88)",
     border: "1px solid rgba(15,23,42,0.06)",
   },
 
-  metricStrong: {
-    borderRadius: 16,
-    padding: 10,
-    background: "rgba(0,122,255,0.10)",
-    border: "1px solid rgba(0,122,255,0.16)",
+  mainInfoCardStrong: {
+    borderRadius: 18,
+    padding: 12,
+    background: C.accentSoft,
+    border: "1px solid rgba(10,132,255,0.16)",
   },
 
-  metricK: { fontSize: 10, fontWeight: 900, color: C.sub, letterSpacing: 0.7 },
-  metricV: { display: "block", marginTop: 4, fontSize: 14, fontWeight: 900, color: C.text },
-  metricBig: { display: "block", marginTop: 2, fontSize: 18, fontWeight: 1000, color: C.accent },
+  mainInfoLabel: {
+    fontSize: 10,
+    fontWeight: 900,
+    color: C.sub,
+    letterSpacing: 0.7,
+  },
 
-  routeDetails: {
+  mainInfoValue: {
+    marginTop: 4,
+    fontSize: 15,
+    fontWeight: 900,
+    color: C.text,
+  },
+
+  mainInfoValueStrong: {
+    marginTop: 4,
+    fontSize: 18,
+    fontWeight: 1000,
+    color: C.accent,
+  },
+
+  secondaryInfoRow: {
     marginTop: 10,
     display: "grid",
     gridTemplateColumns: "1fr 1fr 1fr",
     gap: 10,
   },
 
-  detailItem: {
-    borderRadius: 14,
+  secondaryCard: {
+    borderRadius: 16,
     border: "1px solid rgba(15,23,42,0.06)",
     background: "rgba(248,250,252,0.86)",
     padding: "10px 12px",
   },
 
-  detailLabel: { fontSize: 11, color: C.sub, fontWeight: 800 },
-  detailValue: { marginTop: 4, fontSize: 14, color: C.text, fontWeight: 1000 },
+  secondaryLabel: {
+    fontSize: 11,
+    color: C.sub,
+    fontWeight: 800,
+  },
 
-  moneyCard: {
+  secondaryValue: {
+    marginTop: 4,
+    fontSize: 14,
+    color: C.text,
+    fontWeight: 1000,
+  },
+
+  costBlock: {
     marginTop: 10,
     borderRadius: 18,
     padding: 12,
@@ -1625,15 +1783,53 @@ const styles = {
     border: "1px solid rgba(15,23,42,0.06)",
   },
 
-  actionBtn: {
-    padding: "10px 12px",
-    borderRadius: 14,
+  costHeader: {
+    display: "flex",
+    justifyContent: "space-between",
+    gap: 12,
+  },
+
+  costLabel: {
+    fontSize: 12,
+    color: C.sub,
+  },
+
+  costValue: {
+    fontSize: 20,
+    fontWeight: 1000,
+    color: C.text,
+    marginTop: 2,
+  },
+
+  costAdvantage: {
+    fontSize: 18,
+    fontWeight: 1000,
+    marginTop: 2,
+    animation: "ecoPulse 1.25s ease-in-out infinite",
+  },
+
+  actionRow: {
+    marginTop: 12,
+    display: "flex",
+    gap: 10,
+    alignItems: "center",
+    flexWrap: "wrap",
+  },
+
+  primaryAction: {
+    padding: "11px 14px",
+    borderRadius: 16,
     border: "none",
     color: "#fff",
     fontWeight: 1000,
     cursor: "pointer",
     display: "inline-flex",
     alignItems: "center",
+  },
+
+  tankMeta: {
+    fontSize: 12,
+    color: C.sub,
   },
 
   warningBox: {
@@ -1645,14 +1841,27 @@ const styles = {
     fontWeight: 800,
   },
 
-  navBanner: {
+  tripBanner: {
     marginTop: 10,
     borderRadius: 16,
     padding: 12,
-    background: "rgba(0,122,255,0.08)",
-    border: "1px solid rgba(0,122,255,0.14)",
+    background: "rgba(10,132,255,0.08)",
+    border: "1px solid rgba(10,132,255,0.14)",
   },
 
-  navBannerTitle: { fontSize: 13, color: C.text, fontWeight: 1000 },
-  navBannerSub: { marginTop: 4, fontSize: 12, color: C.sub, fontWeight: 700 },
+  tripBannerTitle: {
+    fontSize: 13,
+    color: C.text,
+    fontWeight: 1000,
+  },
+
+  tripBannerSub: {
+    marginTop: 4,
+    fontSize: 12,
+    color: C.sub,
+    fontWeight: 700,
+  },
 };
+'''
+Path("/mnt/data/MapaGPS.jsx").write_text(content, encoding="utf-8")
+print("/mnt/data/MapaGPS.jsx")
