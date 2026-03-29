@@ -1,11 +1,9 @@
-// ✅ COLE EM: src/context/AuthContext.jsx  (ou .tsx se for o seu caso)
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
 
 const AuthContext = createContext(null);
 
-// “banco local”
-const USERS_KEY = "fitdeal_users_v1";      // guarda todos os usuários
-const SESSION_KEY = "fitdeal_session_v1";  // guarda qual email está logado
+const USERS_KEY = "fitdeal_users_v1";
+const SESSION_KEY = "fitdeal_session_v1";
 
 function readJSON(key, fallback) {
   try {
@@ -15,14 +13,18 @@ function readJSON(key, fallback) {
     return fallback;
   }
 }
+
 function writeJSON(key, value) {
   localStorage.setItem(key, JSON.stringify(value));
+}
+
+function normalizeEmail(value) {
+  return String(value || "").trim().toLowerCase();
 }
 
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
 
-  // ✅ Rehidrata sessão ao abrir o app
   useEffect(() => {
     const sessionEmail = localStorage.getItem(SESSION_KEY);
     if (!sessionEmail) return;
@@ -34,47 +36,43 @@ export function AuthProvider({ children }) {
 
   function signup(form) {
     const nome = String(form?.nome || "").trim();
-    const email = String(form?.email || "").trim().toLowerCase();
+    const email = normalizeEmail(form?.email);
     const senha = String(form?.senha || "").trim();
-    const altura = String(form?.altura || "").trim();
-    const peso = String(form?.peso || "").trim();
 
     if (!nome) return { ok: false, msg: "Nome é obrigatório." };
     if (!email || !email.includes("@")) return { ok: false, msg: "Email inválido." };
     if (!senha || senha.length < 4) return { ok: false, msg: "Senha muito curta." };
 
     const users = readJSON(USERS_KEY, {});
-    if (users[email]) return { ok: false, msg: "Esse email já tem conta. Use Log in." };
+    if (users[email]) return { ok: false, msg: "Esse email já tem conta." };
 
     const newUser = {
       id: crypto?.randomUUID ? crypto.randomUUID() : String(Date.now()),
       nome,
       email,
-      senha, // ⚠️ depois você troca por auth real (Stripe/Backend). Por enquanto ok.
-      altura,
-      peso,
-      objetivo: "hipertrofia",
-      frequencia: 4,
+      senha,
       photoUrl: "",
-      plano: "basic", // basic | nutri+
+      plano: "basic",
       createdAt: Date.now(),
+      ecoState: null,
     };
 
     users[email] = newUser;
     writeJSON(USERS_KEY, users);
     localStorage.setItem(SESSION_KEY, email);
-
     setUser(newUser);
+
     return { ok: true };
   }
 
   function loginWithEmail(emailInput, senhaInput) {
-    const email = String(emailInput || "").trim().toLowerCase();
+    const email = normalizeEmail(emailInput);
     const senha = String(senhaInput || "").trim();
 
     const users = readJSON(USERS_KEY, {});
     const found = users[email];
-    if (!found) return { ok: false, msg: "Conta não encontrada. Use Sign up." };
+
+    if (!found) return { ok: false, msg: "Conta não encontrada." };
     if (found.senha !== senha) return { ok: false, msg: "Senha incorreta." };
 
     localStorage.setItem(SESSION_KEY, email);
@@ -86,12 +84,20 @@ export function AuthProvider({ children }) {
     setUser((prev) => {
       if (!prev) return prev;
 
-      const next = { ...prev, ...patch };
       const users = readJSON(USERS_KEY, {});
-      users[next.email.toLowerCase()] = next;
-      writeJSON(USERS_KEY, users);
+      const prevEmail = normalizeEmail(prev.email);
 
-      localStorage.setItem(SESSION_KEY, next.email.toLowerCase());
+      const next = { ...prev, ...patch };
+      const nextEmail = normalizeEmail(next.email);
+
+      if (nextEmail !== prevEmail) {
+        delete users[prevEmail];
+      }
+
+      users[nextEmail] = next;
+      writeJSON(USERS_KEY, users);
+      localStorage.setItem(SESSION_KEY, nextEmail);
+
       return next;
     });
   }
@@ -102,7 +108,13 @@ export function AuthProvider({ children }) {
   }
 
   const value = useMemo(
-    () => ({ user, signup, loginWithEmail, updateUser, logout }),
+    () => ({
+      user,
+      signup,
+      loginWithEmail,
+      updateUser,
+      logout,
+    }),
     [user]
   );
 
