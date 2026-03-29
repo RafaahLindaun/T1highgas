@@ -10,8 +10,10 @@ const VISITED_KEY = "@EcoRoute:VisitedRoads:v1";
 
 const C = {
   bg: "#E9EEF5",
-  card: "rgba(255,255,255,0.94)",
-  line: "rgba(15,23,42,0.10)",
+  card: "rgba(255,255,255,0.76)",
+  cardStrong: "rgba(255,255,255,0.90)",
+  line: "rgba(255,255,255,0.55)",
+  lineDark: "rgba(15,23,42,0.10)",
   text: "#0F172A",
   sub: "#64748B",
   accent: "#007AFF",
@@ -163,7 +165,7 @@ function sampleRoutePoints(coords, max = 28) {
 
 async function estimateAscentM(samplePoints) {
   try {
-    const pts = samplePoints.slice(0, 30);
+    const pts = sampleRoutePoints(samplePoints, 30);
     const locations = pts.map((p) => `${p.lat},${p.lon}`).join("|");
     const url = `https://api.opentopodata.org/v1/srtm90m?locations=${encodeURIComponent(locations)}`;
     const res = await fetch(url);
@@ -378,7 +380,9 @@ function setRouteModeStorage(v) {
 }
 
 function iconSvg(type) {
-  const common = 'width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#111827" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"';
+  const common =
+    'width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#0F172A" stroke-width="2.35" stroke-linecap="round" stroke-linejoin="round"';
+
   if (type === "search") return `<svg ${common}><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path></svg>`;
   if (type === "locate") return `<svg ${common}><circle cx="12" cy="12" r="3"></circle><path d="M12 2v3"></path><path d="M12 19v3"></path><path d="M2 12h3"></path><path d="M19 12h3"></path></svg>`;
   if (type === "plus") return `<svg ${common}><path d="M12 5v14"></path><path d="M5 12h14"></path></svg>`;
@@ -401,8 +405,8 @@ function uiIcon(type, size = 18) {
       style={{ width: size, height: size, display: "inline-grid", placeItems: "center" }}
       dangerouslySetInnerHTML={{
         __html: iconSvg(type)
-          .replace('width="20"', `width="${size}"`)
-          .replace('height="20"', `height="${size}"`),
+          .replace('width="22"', `width="${size}"`)
+          .replace('height="22"', `height="${size}"`),
       }}
     />
   );
@@ -411,16 +415,16 @@ function uiIcon(type, size = 18) {
 function makeMapIcon(L, kind) {
   const svg =
     kind === "fuel"
-      ? `<svg width="20" height="20" viewBox="0 0 24 24" fill="#111827" xmlns="http://www.w3.org/2000/svg"><path d="M9 20h8V6a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v14Zm6-12v4h-4V8h4Zm2 0h2l1 2v6a2 2 0 0 0 2 2" stroke="#111827" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>`
+      ? `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#0F172A" stroke-width="2.15" stroke-linecap="round" stroke-linejoin="round"><path d="M8 20h8"></path><path d="M9 20V6a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v14"></path><path d="M15 8h2.5a1.5 1.5 0 0 1 1.5 1.5V16a1.5 1.5 0 0 0 1.5 1.5H21"></path></svg>`
       : kind === "camera"
-      ? `<svg width="20" height="20" viewBox="0 0 24 24" fill="#111827" xmlns="http://www.w3.org/2000/svg"><rect x="4" y="7" width="16" height="12" rx="2" fill="none" stroke="#111827" stroke-width="1.6"/><path d="M9 7 10.5 5h3L15 7" fill="none" stroke="#111827" stroke-width="1.6"/><circle cx="12" cy="13" r="3" fill="none" stroke="#111827" stroke-width="1.6"/></svg>`
-      : `<svg width="20" height="20" viewBox="0 0 24 24" fill="#111827" xmlns="http://www.w3.org/2000/svg"><path d="M4 20V10l4-4 4 4v10" fill="none" stroke="#111827" stroke-width="1.6"/><path d="M12 20V8l4-4 4 4v12" fill="none" stroke="#111827" stroke-width="1.6"/></svg>`;
+      ? `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#0F172A" stroke-width="2.15" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="7" width="16" height="12" rx="2"></rect><path d="M9 7 10.5 5h3L15 7"></path><circle cx="12" cy="13" r="3"></circle></svg>`
+      : `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#0F172A" stroke-width="2.15" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20V10l4-4 4 4v10"></path><path d="M12 20V8l4-4 4 4v12"></path></svg>`;
 
   return L.divIcon({
     className: `poi-${kind}`,
-    html: `<div style="width:30px;height:30px;border-radius:999px;background:#fff;border:1px solid rgba(15,23,42,.12);display:grid;place-items:center;box-shadow:0 10px 26px rgba(15,23,42,.18)">${svg}</div>`,
-    iconSize: [30, 30],
-    iconAnchor: [15, 15],
+    html: `<div style="width:34px;height:34px;border-radius:999px;background:rgba(255,255,255,.88);backdrop-filter:blur(16px);border:1px solid rgba(255,255,255,.55);display:grid;place-items:center;box-shadow:0 12px 28px rgba(15,23,42,.16)">${svg}</div>`,
+    iconSize: [34, 34],
+    iconAnchor: [17, 17],
   });
 }
 
@@ -441,6 +445,10 @@ export default function MapaGPS() {
     watchId: null,
     lastGps: null,
   });
+
+  const lastPanAtRef = useRef(0);
+  const lastStableGpsRef = useRef(null);
+  const lastHeadingRef = useRef(0);
 
   const [ready, setReady] = useState(false);
   const [busy, setBusy] = useState({ map: true, route: false, pois: false });
@@ -496,10 +504,12 @@ export default function MapaGPS() {
   function drawVisitedPath() {
     const { L, map } = leafletRef.current;
     if (!L || !map) return;
+
     if (leafletRef.current.passedLayer) {
       map.removeLayer(leafletRef.current.passedLayer);
       leafletRef.current.passedLayer = null;
     }
+
     if (visitedPoints.length < 2) return;
 
     const layer = L.polyline(
@@ -507,11 +517,12 @@ export default function MapaGPS() {
       {
         color: "#F8FAFC",
         weight: 5,
-        opacity: 0.9,
+        opacity: 0.92,
         lineCap: "round",
         lineJoin: "round",
       }
     ).addTo(map);
+
     leafletRef.current.passedLayer = layer;
   }
 
@@ -524,7 +535,7 @@ export default function MapaGPS() {
 
     const centerPoint = {
       x: p.x,
-      y: p.y + 150,
+      y: p.y + 145,
     };
 
     const center = map.unproject(centerPoint, map.getZoom());
@@ -570,6 +581,7 @@ export default function MapaGPS() {
 
   useEffect(() => {
     let mounted = true;
+    let resizeMap = null;
 
     (async () => {
       try {
@@ -623,7 +635,7 @@ export default function MapaGPS() {
 
         setTimeout(() => map.invalidateSize(), 250);
 
-        const resizeMap = () => {
+        resizeMap = () => {
           setTimeout(() => {
             map.invalidateSize();
           }, 120);
@@ -635,20 +647,29 @@ export default function MapaGPS() {
         if ("geolocation" in navigator) {
           const watchId = navigator.geolocation.watchPosition(
             (pos) => {
-              const { latitude, longitude, heading } = pos.coords;
-              const prev = leafletRef.current.lastGps;
+              const { latitude, longitude, heading, accuracy } = pos.coords;
+              const prev = lastStableGpsRef.current;
 
-              let computedHeading = Number.isFinite(heading) && heading !== null ? heading : 0;
+              if (accuracy && accuracy > 80) return;
+
+              let computedHeading =
+                Number.isFinite(heading) && heading !== null ? heading : lastHeadingRef.current || 0;
+
               if (prev) {
                 const dKm = haversineKm(prev.lat, prev.lon, latitude, longitude);
-                if (dKm > 0.003) {
+                if (dKm > 0.005) {
                   computedHeading = bearingDeg(prev.lat, prev.lon, latitude, longitude);
+                } else {
+                  computedHeading = lastHeadingRef.current || computedHeading;
                 }
               }
+
+              lastHeadingRef.current = computedHeading;
 
               const nextGps = { lat: latitude, lon: longitude, heading: computedHeading };
               setGps(nextGps);
               leafletRef.current.lastGps = nextGps;
+              lastStableGpsRef.current = nextGps;
 
               const ll = [latitude, longitude];
               userMarker.setLatLng(ll);
@@ -658,23 +679,35 @@ export default function MapaGPS() {
                 const cons = n(vehicle?.consumption) ?? 10;
                 const usedL = dKm / cons;
 
-                if (dKm > 0.002) {
+                if (dKm > 0.003) {
                   setVisitedPoints((list) => [...list, { lat: latitude, lon: longitude }].slice(-2000));
                 }
 
-                if (usedL > 0) {
+                if (usedL > 0 && dKm > 0.003) {
                   setTank((t) => ({ ...t, levelL: clamp(t.levelL - usedL, 0, t.capacityL) }));
                 }
               }
 
+              const now = Date.now();
+
               if (navMode) {
-                updateThirdPersonCamera(nextGps);
+                if (now - lastPanAtRef.current > 700) {
+                  updateThirdPersonCamera(nextGps);
+                  lastPanAtRef.current = now;
+                }
               } else {
-                map.panTo(ll, { animate: true, duration: 0.45 });
+                if (now - lastPanAtRef.current > 1200) {
+                  map.panTo(ll, { animate: true, duration: 0.45 });
+                  lastPanAtRef.current = now;
+                }
               }
             },
             (err) => console.error("GPS erro:", err),
-            { enableHighAccuracy: true, timeout: 12000, maximumAge: 0 }
+            {
+              enableHighAccuracy: true,
+              timeout: 12000,
+              maximumAge: 1200,
+            }
           );
 
           leafletRef.current.watchId = watchId;
@@ -682,11 +715,6 @@ export default function MapaGPS() {
 
         setBusy((s) => ({ ...s, map: false }));
         setReady(true);
-
-        return () => {
-          window.removeEventListener("resize", resizeMap);
-          window.removeEventListener("orientationchange", resizeMap);
-        };
       } catch (e) {
         console.error(e);
         setBusy((s) => ({ ...s, map: false }));
@@ -694,8 +722,13 @@ export default function MapaGPS() {
     })();
 
     return () => {
+      mounted = false;
       const { map, watchId } = leafletRef.current;
       if (watchId != null && "geolocation" in navigator) navigator.geolocation.clearWatch(watchId);
+      if (resizeMap) {
+        window.removeEventListener("resize", resizeMap);
+        window.removeEventListener("orientationchange", resizeMap);
+      }
       if (map) {
         map.off();
         map.remove();
@@ -863,7 +896,7 @@ export default function MapaGPS() {
       const altLine = L.polyline(altLatLngs, {
         color: "#111827",
         weight: 5,
-        opacity: 0.32,
+        opacity: 0.28,
         dashArray: "10 12",
       }).addTo(map);
       leafletRef.current.altRouteLayer = altLine;
@@ -1257,7 +1290,7 @@ export default function MapaGPS() {
             {tripActive && (
               <div style={styles.navBanner}>
                 <div style={styles.navBannerTitle}>Navegação ativa</div>
-                <div style={styles.navBannerSub}>Câmera com visão avançada e contagem em tempo real.</div>
+                <div style={styles.navBannerSub}>Câmera mais estável e contagem em tempo real.</div>
               </div>
             )}
           </motion.div>
@@ -1299,55 +1332,66 @@ const styles = {
   searchForm: {
     display: "flex",
     alignItems: "center",
-    background: C.card,
-    border: `1px solid ${C.line}`,
-    borderRadius: 18,
+    background: "rgba(255,255,255,0.76)",
+    border: "1px solid rgba(255,255,255,0.55)",
+    borderRadius: 999,
     overflow: "hidden",
-    backdropFilter: "blur(12px)",
-    WebkitBackdropFilter: "blur(12px)",
-    boxShadow: "0 10px 26px rgba(15,23,42,0.10)",
+    backdropFilter: "blur(22px)",
+    WebkitBackdropFilter: "blur(22px)",
+    boxShadow: "0 12px 28px rgba(15,23,42,0.10)",
   },
 
-  searchIcon: { display: "grid", placeItems: "center", width: 44, color: C.sub },
+  searchIcon: {
+    display: "grid",
+    placeItems: "center",
+    width: 48,
+    color: C.sub,
+  },
 
   searchInput: {
     flex: 1,
     border: "none",
     outline: "none",
-    padding: "12px 2px",
+    padding: "13px 2px",
     fontSize: 16,
     background: "transparent",
     color: C.text,
-    fontWeight: 700,
+    fontWeight: 800,
     minWidth: 0,
   },
 
   searchBtn: {
     border: "none",
-    background: C.text,
+    background: C.dark,
     color: "#fff",
-    padding: "0 16px",
-    height: 42,
+    padding: "0 18px",
+    height: 44,
     marginRight: 6,
-    borderRadius: 14,
+    borderRadius: 999,
     cursor: "pointer",
     fontWeight: 900,
   },
 
-  infoPills: { display: "flex", gap: 8, flexWrap: "wrap" },
+  infoPills: {
+    display: "flex",
+    gap: 8,
+    flexWrap: "wrap",
+  },
 
   pill: {
-    height: 36,
-    padding: "0 12px",
+    height: 38,
+    padding: "0 14px",
     borderRadius: 999,
-    border: `1px solid ${C.line}`,
-    background: C.card,
+    border: "1px solid rgba(255,255,255,0.55)",
+    background: "rgba(255,255,255,0.72)",
+    backdropFilter: "blur(18px)",
+    WebkitBackdropFilter: "blur(18px)",
     display: "inline-flex",
     alignItems: "center",
     gap: 8,
     color: C.text,
-    boxShadow: "0 10px 26px rgba(15,23,42,0.08)",
-    fontWeight: 800,
+    boxShadow: "0 12px 28px rgba(15,23,42,0.08)",
+    fontWeight: 900,
     fontSize: 12,
   },
 
@@ -1361,8 +1405,8 @@ const styles = {
   },
 
   loadingCard: {
-    background: C.card,
-    border: `1px solid ${C.line}`,
+    background: C.cardStrong,
+    border: `1px solid ${C.lineDark}`,
     borderRadius: 18,
     padding: "14px 16px",
     boxShadow: "0 10px 26px rgba(15,23,42,0.10)",
@@ -1381,12 +1425,14 @@ const styles = {
   },
 
   ctrlBtn: {
-    width: 50,
-    height: 50,
-    borderRadius: 16,
-    border: `1px solid ${C.line}`,
-    background: C.card,
-    boxShadow: "0 10px 26px rgba(15,23,42,0.12)",
+    width: 54,
+    height: 54,
+    borderRadius: 999,
+    border: "1px solid rgba(255,255,255,0.55)",
+    background: "rgba(255,255,255,0.72)",
+    backdropFilter: "blur(18px)",
+    WebkitBackdropFilter: "blur(18px)",
+    boxShadow: "0 14px 34px rgba(15,23,42,0.12)",
     cursor: "pointer",
     display: "grid",
     placeItems: "center",
@@ -1403,59 +1449,61 @@ const styles = {
   },
 
   poiBtn: {
-    width: 50,
-    height: 50,
-    borderRadius: 16,
-    border: `1px solid ${C.line}`,
-    background: "rgba(255,255,255,0.84)",
-    boxShadow: "0 10px 26px rgba(15,23,42,0.10)",
+    width: 54,
+    height: 54,
+    borderRadius: 999,
+    border: "1px solid rgba(255,255,255,0.55)",
+    background: "rgba(255,255,255,0.70)",
+    backdropFilter: "blur(18px)",
+    WebkitBackdropFilter: "blur(18px)",
+    boxShadow: "0 14px 34px rgba(15,23,42,0.10)",
     cursor: "pointer",
     display: "grid",
     placeItems: "center",
   },
 
   poiBtnActive: {
-    background: "#FFFFFF",
-    boxShadow: "0 10px 26px rgba(0,122,255,0.18)",
+    background: "rgba(255,255,255,0.88)",
+    boxShadow: "0 14px 34px rgba(0,122,255,0.14)",
   },
 
   tankWrap: {
     position: "absolute",
     left: 12,
-    top: "36%",
+    top: "34%",
     transform: "translateY(-50%)",
     zIndex: 9999,
-    width: 42,
-    padding: "10px 8px",
-    borderRadius: 18,
-    background: C.card,
-    border: `1px solid ${C.line}`,
+    width: 34,
+    padding: "8px 6px",
+    borderRadius: 16,
+    background: C.cardStrong,
+    border: `1px solid ${C.lineDark}`,
     boxShadow: "0 10px 26px rgba(15,23,42,0.12)",
     backdropFilter: "blur(12px)",
     WebkitBackdropFilter: "blur(12px)",
     display: "flex",
     flexDirection: "column",
     alignItems: "center",
-    gap: 8,
+    gap: 7,
     cursor: "pointer",
     userSelect: "none",
   },
 
-  tankLabelTop: { fontSize: 10, fontWeight: 900, color: C.text, opacity: 0.7 },
-  tankLabelBottom: { fontSize: 10, fontWeight: 900, color: C.text, opacity: 0.7 },
+  tankLabelTop: { fontSize: 9, fontWeight: 900, color: C.text, opacity: 0.7 },
+  tankLabelBottom: { fontSize: 9, fontWeight: 900, color: C.text, opacity: 0.7 },
 
-  dotsCol: { display: "flex", flexDirection: "column", gap: 5 },
+  dotsCol: { display: "flex", flexDirection: "column", gap: 4 },
 
   dot: {
-    width: 10,
-    height: 10,
+    width: 8,
+    height: 8,
     borderRadius: 999,
     background: C.success,
   },
 
   litersToast: {
     position: "absolute",
-    left: 48,
+    left: 42,
     top: "50%",
     transform: "translateY(-50%)",
     background: "rgba(15,23,42,0.94)",
@@ -1473,13 +1521,13 @@ const styles = {
     right: "max(12px, env(safe-area-inset-right))",
     bottom: "max(84px, calc(env(safe-area-inset-bottom) + 72px))",
     zIndex: 9999,
-    borderRadius: 22,
+    borderRadius: 24,
     padding: 14,
-    background: "rgba(255,255,255,0.95)",
-    border: `1px solid ${C.line}`,
-    boxShadow: "0 18px 50px rgba(15,23,42,0.18)",
-    backdropFilter: "blur(18px)",
-    WebkitBackdropFilter: "blur(18px)",
+    background: "rgba(255,255,255,0.86)",
+    border: "1px solid rgba(255,255,255,0.55)",
+    boxShadow: "0 18px 50px rgba(15,23,42,0.16)",
+    backdropFilter: "blur(24px)",
+    WebkitBackdropFilter: "blur(24px)",
   },
 
   dragHandleWrap: {
@@ -1514,8 +1562,8 @@ const styles = {
     height: 32,
     padding: "0 10px",
     borderRadius: 12,
-    border: `1px solid ${C.line}`,
-    background: "transparent",
+    border: `1px solid ${C.lineDark}`,
+    background: "rgba(255,255,255,0.58)",
     color: C.sub,
     cursor: "pointer",
     fontWeight: 800,
@@ -1527,12 +1575,17 @@ const styles = {
     color: "#fff",
   },
 
-  metricsRow: { marginTop: 10, display: "grid", gridTemplateColumns: "1fr 1fr 1.25fr", gap: 10 },
+  metricsRow: {
+    marginTop: 10,
+    display: "grid",
+    gridTemplateColumns: "1fr 1fr 1.25fr",
+    gap: 10,
+  },
 
   metric: {
     borderRadius: 16,
     padding: 10,
-    background: "rgba(248,250,252,0.9)",
+    background: "rgba(248,250,252,0.88)",
     border: "1px solid rgba(15,23,42,0.06)",
   },
 
@@ -1540,19 +1593,24 @@ const styles = {
     borderRadius: 16,
     padding: 10,
     background: "rgba(0,122,255,0.10)",
-    border: "1px solid rgba(0,122,255,0.18)",
+    border: "1px solid rgba(0,122,255,0.16)",
   },
 
   metricK: { fontSize: 10, fontWeight: 900, color: C.sub, letterSpacing: 0.7 },
   metricV: { display: "block", marginTop: 4, fontSize: 14, fontWeight: 900, color: C.text },
   metricBig: { display: "block", marginTop: 2, fontSize: 18, fontWeight: 1000, color: C.accent },
 
-  routeDetails: { marginTop: 10, display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 },
+  routeDetails: {
+    marginTop: 10,
+    display: "grid",
+    gridTemplateColumns: "1fr 1fr 1fr",
+    gap: 10,
+  },
 
   detailItem: {
     borderRadius: 14,
     border: "1px solid rgba(15,23,42,0.06)",
-    background: "rgba(248,250,252,0.9)",
+    background: "rgba(248,250,252,0.86)",
     padding: "10px 12px",
   },
 
@@ -1563,7 +1621,7 @@ const styles = {
     marginTop: 10,
     borderRadius: 18,
     padding: 12,
-    background: "rgba(255,255,255,0.92)",
+    background: "rgba(255,255,255,0.82)",
     border: "1px solid rgba(15,23,42,0.06)",
   },
 
@@ -1592,7 +1650,7 @@ const styles = {
     borderRadius: 16,
     padding: 12,
     background: "rgba(0,122,255,0.08)",
-    border: "1px solid rgba(0,122,255,0.16)",
+    border: "1px solid rgba(0,122,255,0.14)",
   },
 
   navBannerTitle: { fontSize: 13, color: C.text, fontWeight: 1000 },
