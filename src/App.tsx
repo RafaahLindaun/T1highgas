@@ -6,6 +6,7 @@ import IA_Command from "./pages/IA";
 import CarBase from "./pages/CarBase";
 import RoutesHistory from "./pages/Routes";
 import Conta from "./pages/Conta";
+import Abastecimento from "./pages/Abastecimento";
 
 import BottomMenu from "./components/BottomMenu";
 import ProtectedRoute from "./components/ProtectedRoute";
@@ -19,7 +20,8 @@ function AppRoutes() {
     <BrowserRouter>
       <Routes>
         <Route path="/" element={!user ? <Login /> : <Navigate to="/mapa" />} />
-
+        
+<Route path="/abastecimento" element={<ProtectedRoute><Abastecimento /></ProtectedRoute>} />
         <Route path="/mapa" element={<ProtectedRoute><MapaGPS /></ProtectedRoute>} />
         <Route path="/ia" element={<ProtectedRoute><IA_Command /></ProtectedRoute>} />
         <Route path="/carbase" element={<ProtectedRoute><CarBase /></ProtectedRoute>} />
