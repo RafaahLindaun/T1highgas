@@ -4,27 +4,16 @@ import { AnimatePresence, motion } from "framer-motion";
 import { useAuth } from "../context/AuthContext";
 import { useEco } from "../context/EcoContext";
 
-/**
- * iOS “Settings” inspired (light, 60/30/10) with simple motion.
- * - 60% background: iOS grouped background
- * - 30% surfaces: white cards
- * - 10% accent: iOS blue
- *
- * NOTE: Some toggles are app-level preferences stored locally (not OS settings).
- */
-
-const USERS_KEY = "fitdeal_users_v1";
-const SESSION_KEY = "fitdeal_session_v1";
 const PREFS_KEY = "@EcoRoute:Prefs:v1";
 
-const COLORS = {
-  bg: "#F2F2F7", // iOS grouped background
-  card: "#FFFFFF",
+const C = {
+  bg: "#F2F2F7",
+  surface: "#FFFFFF",
   line: "rgba(60,60,67,0.18)",
   text: "#111111",
   sub: "rgba(60,60,67,0.72)",
   sub2: "rgba(60,60,67,0.55)",
-  accent: "#007AFF", // iOS blue
+  accent: "#007AFF",
   danger: "#FF3B30",
   shadow: "rgba(0,0,0,0.08)",
 };
@@ -55,7 +44,7 @@ function Chevron() {
     <span
       aria-hidden="true"
       style={{
-        color: COLORS.sub2,
+        color: C.sub2,
         fontWeight: 900,
         marginLeft: 10,
         transform: "translateY(-0.5px)",
@@ -76,16 +65,7 @@ function Section({ title, children, hint }) {
   );
 }
 
-function Row({
-  title,
-  subtitle,
-  right,
-  onClick,
-  danger,
-  disabled,
-  icon,
-  chevron = true,
-}) {
+function Row({ title, subtitle, right, onClick, danger, disabled, chevron = true }) {
   return (
     <motion.button
       type="button"
@@ -98,11 +78,8 @@ function Row({
       }}
     >
       <div style={S.rowLeft}>
-        {icon ? <div style={S.iconWrap}>{icon}</div> : null}
         <div style={{ minWidth: 0 }}>
-          <div style={{ ...S.rowTitle, color: danger ? COLORS.danger : COLORS.text }}>
-            {title}
-          </div>
+          <div style={{ ...S.rowTitle, color: danger ? C.danger : C.text }}>{title}</div>
           {subtitle ? <div style={S.rowSub}>{subtitle}</div> : null}
         </div>
       </div>
@@ -115,11 +92,10 @@ function Row({
   );
 }
 
-function ToggleRow({ title, subtitle, value, onChange, icon }) {
+function ToggleRow({ title, subtitle, value, onChange }) {
   return (
     <div style={S.rowStatic}>
       <div style={S.rowLeft}>
-        {icon ? <div style={S.iconWrap}>{icon}</div> : null}
         <div style={{ minWidth: 0 }}>
           <div style={S.rowTitle}>{title}</div>
           {subtitle ? <div style={S.rowSub}>{subtitle}</div> : null}
@@ -139,7 +115,7 @@ function IOSSwitch({ value, onChange }) {
       aria-pressed={value}
       style={{
         ...S.switch,
-        background: value ? COLORS.accent : "rgba(120,120,128,0.20)",
+        background: value ? C.accent : "rgba(120,120,128,0.20)",
         justifyContent: value ? "flex-end" : "flex-start",
       }}
     >
@@ -176,6 +152,19 @@ function Modal({ title, subtitle, children, onClose }) {
   );
 }
 
+function Divider() {
+  return <div style={S.divider} />;
+}
+
+function Field({ label, children }) {
+  return (
+    <div>
+      <div style={S.fieldLabel}>{label}</div>
+      {children}
+    </div>
+  );
+}
+
 export default function Conta() {
   const { user, updateUser, logout } = useAuth();
   const eco = useEco();
@@ -198,25 +187,18 @@ export default function Conta() {
 
   const [editOpen, setEditOpen] = useState(false);
   const [editMsg, setEditMsg] = useState("");
-  const [infoOpen, setInfoOpen] = useState(null); // "about" | "terms" | "privacy"
-
-  const [confirm, setConfirm] = useState(null); // {type, title, body, actionLabel, onConfirm}
+  const [infoOpen, setInfoOpen] = useState(null);
+  const [confirm, setConfirm] = useState(null);
 
   const [form, setForm] = useState(() => ({
     nome: user?.nome || "",
     email: user?.email || "",
-    altura: user?.altura || "",
-    peso: user?.peso || "",
-    objetivo: user?.objetivo || "hipertrofia",
-    frequencia: String(user?.frequencia ?? 4),
   }));
 
   const photo = user?.photoUrl || "";
 
-  // persist prefs
   useMemo(() => {
     writeJSON(PREFS_KEY, prefs);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [prefs]);
 
   if (!user) return null;
@@ -239,35 +221,8 @@ export default function Conta() {
     setForm({
       nome: user?.nome || "",
       email: user?.email || "",
-      altura: user?.altura || "",
-      peso: user?.peso || "",
-      objetivo: user?.objetivo || "hipertrofia",
-      frequencia: String(user?.frequencia ?? 4),
     });
     setEditOpen(true);
-  }
-
-  function migrateEmailData(oldEmail, newEmail) {
-    // Pagamentos
-    const oldKeyPay = `payments_${oldEmail}`;
-    const newKeyPay = `payments_${newEmail}`;
-    const payRaw = localStorage.getItem(oldKeyPay);
-    if (payRaw && !localStorage.getItem(newKeyPay)) localStorage.setItem(newKeyPay, payRaw);
-    if (payRaw) localStorage.removeItem(oldKeyPay);
-
-    // status pago
-    const oldPaid = `paid_${oldEmail}`;
-    const newPaid = `paid_${newEmail}`;
-    const paid = localStorage.getItem(oldPaid);
-    if (paid && !localStorage.getItem(newPaid)) localStorage.setItem(newPaid, paid);
-    if (paid) localStorage.removeItem(oldPaid);
-
-    // EcoContext por email (v2)
-    const oldEco = `@EcoRoute:EcoState:${oldEmail}:v2`;
-    const newEco = `@EcoRoute:EcoState:${newEmail}:v2`;
-    const ecoRaw = localStorage.getItem(oldEco);
-    if (ecoRaw && !localStorage.getItem(newEco)) localStorage.setItem(newEco, ecoRaw);
-    if (ecoRaw) localStorage.removeItem(oldEco);
   }
 
   function saveProfile() {
@@ -275,38 +230,32 @@ export default function Conta() {
 
     const nome = String(form.nome || "").trim();
     const email = String(form.email || "").trim().toLowerCase();
-    const altura = String(form.altura || "").trim();
-    const peso = String(form.peso || "").trim();
-    const objetivo = String(form.objetivo || "").trim() || "hipertrofia";
-    const freq = clampNum(form.frequencia, 1, 14);
 
     if (!nome) return setEditMsg("Nome é obrigatório.");
     if (!email || !email.includes("@")) return setEditMsg("Email inválido.");
 
-    const oldEmail = String(user?.email || "").toLowerCase();
-    if (oldEmail && email !== oldEmail) migrateEmailData(oldEmail, email);
-
-    updateUser({
-      nome,
-      email,
-      altura,
-      peso,
-      objetivo,
-      frequencia: freq ?? 4,
-    });
-
+    updateUser({ nome, email });
     setEditOpen(false);
   }
 
   const planLabel = user?.plano === "nutri+" ? "Nutri+" : "Basic";
 
   const profileMeta = useMemo(() => {
-    const a = user?.altura ? `${user.altura} cm` : "—";
-    const p = user?.peso ? `${user.peso} kg` : "—";
-    const f = Number.isFinite(Number(user?.frequencia)) ? `${user.frequencia}x/sem` : "—";
-    const obj = user?.objetivo ? String(user.objetivo) : "—";
-    return { a, p, f, obj };
-  }, [user]);
+    const car = eco?.vehicle?.model || "Sem carro";
+    const mode =
+      eco?.routeMode === "fast"
+        ? "Rápido"
+        : eco?.routeMode === "balanced"
+        ? "Balanceado"
+        : "Eco";
+
+    const tankLabel =
+      eco?.tank?.capacityL && eco?.tank?.levelL != null
+        ? `${Number(eco.tank.levelL).toFixed(1)}L / ${Number(eco.tank.capacityL).toFixed(0)}L`
+        : "Não configurado";
+
+    return { car, mode, tankLabel };
+  }, [eco?.vehicle?.model, eco?.routeMode, eco?.tank?.capacityL, eco?.tank?.levelL]);
 
   function clearAppDataKeepAccount() {
     const email = String(user?.email || "").toLowerCase();
@@ -319,39 +268,11 @@ export default function Conta() {
       "@EcoRoute:Tank:v1",
     ];
     keysToRemove.forEach((k) => localStorage.removeItem(k));
-    setPrefs(readJSON(PREFS_KEY, {
-      notifications: true,
-      sounds: true,
-      haptics: true,
-      shareLocation: true,
-      analytics: false,
-      autoRecalc: true,
-      avoidTolls: false,
-      avoidHighways: false,
-    }));
-    // mantém usuário logado e conta intacta
     window.location.reload();
-  }
-
-  function deleteAccount() {
-    const email = String(user?.email || "").toLowerCase();
-
-    const users = readJSON(USERS_KEY, {});
-    delete users[email];
-    writeJSON(USERS_KEY, users);
-
-    localStorage.removeItem(`payments_${email}`);
-    localStorage.removeItem(`paid_${email}`);
-    localStorage.removeItem(`@EcoRoute:EcoState:${email}:v2`);
-    localStorage.removeItem(SESSION_KEY);
-
-    logout();
-    nav("/");
   }
 
   return (
     <div style={S.page}>
-      {/* header background blobs */}
       <div style={S.bgBlobs} aria-hidden="true">
         <motion.div
           style={S.blobA}
@@ -367,7 +288,6 @@ export default function Conta() {
 
       <input ref={fileRef} type="file" accept="image/*" style={{ display: "none" }} onChange={onFile} />
 
-      {/* Apple ID style cell */}
       <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.25 }}>
         <div style={S.profileCard}>
           <button type="button" onClick={pickPhoto} style={S.avatarBtn} title="Trocar foto">
@@ -383,98 +303,58 @@ export default function Conta() {
             <div style={S.profileEmail}>{user.email}</div>
             <div style={S.profilePills}>
               <span style={S.pill}>{planLabel}</span>
-              <span style={S.pillSoft}>{profileMeta.obj}</span>
+              <span style={S.pillSoft}>{profileMeta.mode}</span>
             </div>
           </div>
 
-          <motion.button
-            type="button"
-            style={S.editBtn}
-            onClick={openEdit}
-            whileTap={{ scale: 0.98 }}
-          >
+          <motion.button type="button" style={S.editBtn} onClick={openEdit} whileTap={{ scale: 0.98 }}>
             Editar
           </motion.button>
         </div>
 
         <div style={S.profileStats}>
           <div style={S.stat}>
-            <div style={S.statK}>Altura</div>
-            <div style={S.statV}>{profileMeta.a}</div>
+            <div style={S.statK}>Carro</div>
+            <div style={S.statV}>{profileMeta.car}</div>
           </div>
           <div style={S.stat}>
-            <div style={S.statK}>Peso</div>
-            <div style={S.statV}>{profileMeta.p}</div>
+            <div style={S.statK}>Modo</div>
+            <div style={S.statV}>{profileMeta.mode}</div>
           </div>
           <div style={S.stat}>
-            <div style={S.statK}>Frequência</div>
-            <div style={S.statV}>{profileMeta.f}</div>
+            <div style={S.statK}>Tanque</div>
+            <div style={S.statV}>{profileMeta.tankLabel}</div>
           </div>
         </div>
       </motion.div>
 
-      {/* Settings sections */}
       <Section title="CONTA">
         <Row
           title="Pagamentos"
           subtitle="Histórico e status do plano"
           onClick={() => nav("/pagamentos")}
           right={planLabel}
-          icon={<span>💳</span>}
-        />
-        <Divider />
-        <Row
-          title="Assinatura"
-          subtitle="Gerenciar plano e benefícios"
-          onClick={() => nav("/pagamentos")}
-          right={planLabel}
-          icon={<span>🧾</span>}
         />
       </Section>
 
-      <Section title="ECO & NAVEGAÇÃO" hint="O essencial do app: carro, tanque e rotas.">
+      <Section title="ECO E NAVEGAÇÃO" hint="Somente dados úteis para o app atual.">
         <Row
           title="Carro e consumo"
           subtitle="Defina combustível, km/L e preço"
           onClick={() => nav("/carbase")}
           right={eco?.vehicle?.model ? "Configurado" : "Configurar"}
-          icon={<span>🚗</span>}
         />
         <Divider />
         <Row
           title="IA do carro"
           subtitle="Selecionar carro e perfil"
           onClick={() => nav("/ia")}
-          icon={<span>✨</span>}
         />
         <Divider />
         <Row
           title="Histórico de rotas"
           subtitle="Distância, tempo e economia"
           onClick={() => nav("/routes")}
-          icon={<span>🗺️</span>}
-        />
-        <Divider />
-        <Row
-          title="Insights"
-          subtitle="Resumo e comportamento eco"
-          onClick={() => nav("/ecoinsights")}
-          icon={<span>📈</span>}
-        />
-        <Divider />
-        <Row
-          title="Manutenção"
-          subtitle="Rotina e lembretes"
-          onClick={() => nav("/maintenance")}
-          icon={<span>🧰</span>}
-        />
-        <Divider />
-        <Row
-          title="Radar de postos"
-          subtitle="Ver postos próximos (no mapa)"
-          onClick={() => nav("/mapa")}
-          right="Abrir"
-          icon={<span>⛽</span>}
         />
       </Section>
 
@@ -484,31 +364,27 @@ export default function Conta() {
           subtitle="Alertas do app"
           value={prefs.notifications}
           onChange={(v) => setPrefs((p) => ({ ...p, notifications: v }))}
-          icon={<span>🔔</span>}
         />
         <Divider />
         <ToggleRow
           title="Sons"
-          subtitle="Efeitos e feedback"
+          subtitle="Feedback do app"
           value={prefs.sounds}
           onChange={(v) => setPrefs((p) => ({ ...p, sounds: v }))}
-          icon={<span>🔊</span>}
         />
         <Divider />
         <ToggleRow
           title="Háptico"
-          subtitle="Vibração ao tocar"
+          subtitle="Resposta ao toque"
           value={prefs.haptics}
           onChange={(v) => setPrefs((p) => ({ ...p, haptics: v }))}
-          icon={<span>📳</span>}
         />
         <Divider />
         <ToggleRow
           title="Recalcular automaticamente"
-          subtitle="Ao mudar trajeto"
+          subtitle="Ao mudar de trajeto"
           value={prefs.autoRecalc}
           onChange={(v) => setPrefs((p) => ({ ...p, autoRecalc: v }))}
-          icon={<span>🔁</span>}
         />
         <Divider />
         <Row
@@ -516,7 +392,6 @@ export default function Conta() {
           subtitle="Preferência de rota"
           onClick={() => setPrefs((p) => ({ ...p, avoidTolls: !p.avoidTolls }))}
           right={prefs.avoidTolls ? "Ligado" : "Desligado"}
-          icon={<span>🛣️</span>}
         />
         <Divider />
         <Row
@@ -524,17 +399,15 @@ export default function Conta() {
           subtitle="Preferência de rota"
           onClick={() => setPrefs((p) => ({ ...p, avoidHighways: !p.avoidHighways }))}
           right={prefs.avoidHighways ? "Ligado" : "Desligado"}
-          icon={<span>🚧</span>}
         />
       </Section>
 
-      <Section title="PRIVACIDADE & SEGURANÇA">
+      <Section title="PRIVACIDADE">
         <ToggleRow
           title="Compartilhar localização"
           subtitle="Necessário para GPS e rotas"
           value={prefs.shareLocation}
           onChange={(v) => setPrefs((p) => ({ ...p, shareLocation: v }))}
-          icon={<span>📍</span>}
         />
         <Divider />
         <ToggleRow
@@ -542,46 +415,15 @@ export default function Conta() {
           subtitle="Enviar dados anônimos"
           value={prefs.analytics}
           onChange={(v) => setPrefs((p) => ({ ...p, analytics: v }))}
-          icon={<span>🧪</span>}
-        />
-        <Divider />
-        <Row
-          title="Senha"
-          subtitle="Trocar senha (v2)"
-          disabled
-          right="Em breve"
-          icon={<span>🔒</span>}
         />
       </Section>
 
       <Section title="SUPORTE">
-        <Row
-          title="Ajuda"
-          subtitle="Dúvidas e tutoriais"
-          onClick={() => setInfoOpen("help")}
-          icon={<span>💬</span>}
-        />
+        <Row title="Ajuda" subtitle="Uso básico do app" onClick={() => setInfoOpen("help")} />
         <Divider />
-        <Row
-          title="Sobre"
-          subtitle="Versão e créditos"
-          onClick={() => setInfoOpen("about")}
-          icon={<span>ℹ️</span>}
-        />
+        <Row title="Sobre" subtitle="Versão e informações" onClick={() => setInfoOpen("about")} />
         <Divider />
-        <Row
-          title="Termos"
-          subtitle="Uso do app"
-          onClick={() => setInfoOpen("terms")}
-          icon={<span>📄</span>}
-        />
-        <Divider />
-        <Row
-          title="Privacidade"
-          subtitle="Política de privacidade"
-          onClick={() => setInfoOpen("privacy")}
-          icon={<span>🛡️</span>}
-        />
+        <Row title="Privacidade" subtitle="Política local do protótipo" onClick={() => setInfoOpen("privacy")} />
       </Section>
 
       <Section title="AÇÕES">
@@ -590,7 +432,6 @@ export default function Conta() {
           subtitle="Encerrar sessão"
           onClick={() =>
             setConfirm({
-              type: "logout",
               title: "Sair da conta?",
               body: "Você será desconectado deste dispositivo.",
               actionLabel: "Sair",
@@ -600,49 +441,25 @@ export default function Conta() {
               },
             })
           }
-          icon={<span>🚪</span>}
         />
         <Divider />
         <Row
           title="Apagar dados do app"
-          subtitle="Limpa rotas, prefs e cache (mantém a conta)"
+          subtitle="Limpa histórico, preferências e cache"
           onClick={() =>
             setConfirm({
-              type: "wipe",
               title: "Apagar dados do app?",
-              body: "Isso remove histórico de rotas, preferências e estado Eco deste dispositivo.",
+              body: "Isso remove dados locais deste dispositivo e mantém sua conta.",
               actionLabel: "Apagar",
               onConfirm: clearAppDataKeepAccount,
             })
           }
-          icon={<span>🧹</span>}
-        />
-        <Divider />
-        <Row
-          title="Apagar conta"
-          subtitle="Remove sua conta deste app"
-          danger
-          onClick={() =>
-            setConfirm({
-              type: "delete",
-              title: "Apagar conta?",
-              body: "Isso remove sua conta e dados locais associados. Não pode ser desfeito.",
-              actionLabel: "Apagar conta",
-              onConfirm: deleteAccount,
-            })
-          }
-          icon={<span>🗑️</span>}
         />
       </Section>
 
-      {/* Modals */}
       <AnimatePresence>
         {editOpen && (
-          <Modal
-            title="Editar perfil"
-            subtitle="Informações da sua conta"
-            onClose={() => setEditOpen(false)}
-          >
+          <Modal title="Editar perfil" subtitle="Informações principais da conta" onClose={() => setEditOpen(false)}>
             <div style={{ display: "grid", gap: 10 }}>
               <Field label="Nome">
                 <input
@@ -661,50 +478,6 @@ export default function Conta() {
                   placeholder="seu@email.com"
                 />
               </Field>
-
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-                <Field label="Altura (cm)">
-                  <input
-                    value={form.altura}
-                    onChange={(e) => setForm((p) => ({ ...p, altura: e.target.value }))}
-                    style={S.input}
-                    inputMode="numeric"
-                    placeholder="Ex: 175"
-                  />
-                </Field>
-                <Field label="Peso (kg)">
-                  <input
-                    value={form.peso}
-                    onChange={(e) => setForm((p) => ({ ...p, peso: e.target.value }))}
-                    style={S.input}
-                    inputMode="decimal"
-                    placeholder="Ex: 80"
-                  />
-                </Field>
-              </div>
-
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-                <Field label="Objetivo">
-                  <select
-                    value={form.objetivo}
-                    onChange={(e) => setForm((p) => ({ ...p, objetivo: e.target.value }))}
-                    style={S.input}
-                  >
-                    <option value="hipertrofia">Hipertrofia</option>
-                    <option value="emagrecimento">Emagrecimento</option>
-                    <option value="condicionamento">Condicionamento</option>
-                  </select>
-                </Field>
-                <Field label="Frequência (x/sem)">
-                  <input
-                    value={form.frequencia}
-                    onChange={(e) => setForm((p) => ({ ...p, frequencia: e.target.value }))}
-                    style={S.input}
-                    inputMode="numeric"
-                    placeholder="Ex: 4"
-                  />
-                </Field>
-              </div>
 
               {editMsg ? <div style={S.inlineMsg}>{editMsg}</div> : null}
 
@@ -725,8 +498,6 @@ export default function Conta() {
             title={
               infoOpen === "about"
                 ? "Sobre"
-                : infoOpen === "terms"
-                ? "Termos"
                 : infoOpen === "privacy"
                 ? "Privacidade"
                 : "Ajuda"
@@ -734,10 +505,10 @@ export default function Conta() {
             subtitle=""
             onClose={() => setInfoOpen(null)}
           >
-            <div style={{ color: COLORS.sub, fontSize: 13, lineHeight: 1.55 }}>
+            <div style={{ color: C.sub, fontSize: 13, lineHeight: 1.55 }}>
               {infoOpen === "about" && (
                 <>
-                  <div style={{ fontWeight: 900, color: COLORS.text }}>EcoRoute (Teste)</div>
+                  <div style={{ fontWeight: 900, color: C.text }}>EcoRoute (Teste)</div>
                   <div style={{ marginTop: 6 }}>
                     App focado em rotas e economia de combustível.
                   </div>
@@ -753,29 +524,20 @@ export default function Conta() {
 
               {infoOpen === "help" && (
                 <>
-                  <div style={{ fontWeight: 900, color: COLORS.text }}>Como usar</div>
+                  <div style={{ fontWeight: 900, color: C.text }}>Como usar</div>
                   <ul style={{ marginTop: 8 }}>
-                    <li>Cadastre o carro em <b>CarBase</b> (km/L e preço).</li>
-                    <li>No mapa, selecione destino e veja litros/R$ estimados.</li>
-                    <li>Use <b>GO/STOP</b> para contagem real durante a viagem.</li>
+                    <li>Cadastre o carro em <b>CarBase</b>.</li>
+                    <li>No mapa, selecione destino e veja litros e custo estimados.</li>
+                    <li>Use <b>GO</b> e <b>STOP</b> para contagem ao vivo durante a viagem.</li>
                   </ul>
-                </>
-              )}
-
-              {infoOpen === "terms" && (
-                <>
-                  <div style={{ fontWeight: 900, color: COLORS.text }}>Termos (placeholder)</div>
-                  <div style={{ marginTop: 6 }}>
-                    Este é um protótipo. As estimativas são aproximadas e podem variar.
-                  </div>
                 </>
               )}
 
               {infoOpen === "privacy" && (
                 <>
-                  <div style={{ fontWeight: 900, color: COLORS.text }}>Privacidade (placeholder)</div>
+                  <div style={{ fontWeight: 900, color: C.text }}>Privacidade local</div>
                   <div style={{ marginTop: 6 }}>
-                    Dados são armazenados localmente neste protótipo. Desative “Compartilhar localização” se preferir.
+                    Este protótipo usa armazenamento local e preferências do próprio navegador.
                   </div>
                 </>
               )}
@@ -794,10 +556,7 @@ export default function Conta() {
             <div style={{ display: "grid", gap: 10 }}>
               <motion.button
                 type="button"
-                style={{
-                  ...S.btnDangerWide,
-                  background: confirm.type === "delete" ? COLORS.danger : COLORS.accent,
-                }}
+                style={S.btnAccentWide}
                 whileTap={{ scale: 0.985 }}
                 onClick={() => {
                   const fn = confirm.onConfirm;
@@ -821,24 +580,10 @@ export default function Conta() {
   );
 }
 
-function Divider() {
-  return <div style={S.divider} />;
-}
-
-function Field({ label, children }) {
-  return (
-    <div>
-      <div style={S.fieldLabel}>{label}</div>
-      {children}
-    </div>
-  );
-}
-
-/* ---------------- Styles ---------------- */
 const S = {
   page: {
     minHeight: "100vh",
-    background: COLORS.bg,
+    background: C.bg,
     padding: 16,
     paddingBottom: 110,
     position: "relative",
@@ -854,7 +599,6 @@ const S = {
     left: -110,
     top: -120,
     background: "radial-gradient(circle at 30% 30%, rgba(0,122,255,0.22), rgba(0,122,255,0.02))",
-    filter: "blur(2px)",
   },
   blobB: {
     position: "absolute",
@@ -864,14 +608,13 @@ const S = {
     right: -150,
     top: -160,
     background: "radial-gradient(circle at 30% 30%, rgba(88,86,214,0.18), rgba(88,86,214,0.02))",
-    filter: "blur(2px)",
   },
 
   profileCard: {
-    background: COLORS.card,
+    background: C.surface,
     borderRadius: 18,
-    border: `1px solid ${COLORS.line}`,
-    boxShadow: `0 18px 45px ${COLORS.shadow}`,
+    border: `1px solid ${C.line}`,
+    boxShadow: `0 18px 45px ${C.shadow}`,
     padding: 14,
     display: "grid",
     gridTemplateColumns: "56px 1fr auto",
@@ -884,7 +627,7 @@ const S = {
     width: 56,
     height: 56,
     borderRadius: 16,
-    border: `1px solid ${COLORS.line}`,
+    border: `1px solid ${C.line}`,
     background: "rgba(0,0,0,0.02)",
     overflow: "hidden",
     display: "grid",
@@ -898,14 +641,14 @@ const S = {
     display: "grid",
     placeItems: "center",
     fontWeight: 1000,
-    color: COLORS.text,
+    color: C.text,
     fontSize: 18,
   },
 
   profileName: {
     fontSize: 16,
     fontWeight: 1000,
-    color: COLORS.text,
+    color: C.text,
     letterSpacing: -0.3,
     lineHeight: 1.1,
     whiteSpace: "nowrap",
@@ -915,7 +658,7 @@ const S = {
   profileEmail: {
     marginTop: 4,
     fontSize: 12,
-    color: COLORS.sub,
+    color: C.sub,
     fontWeight: 700,
     whiteSpace: "nowrap",
     overflow: "hidden",
@@ -925,7 +668,7 @@ const S = {
   pill: {
     fontSize: 11,
     fontWeight: 900,
-    color: COLORS.accent,
+    color: C.accent,
     background: "rgba(0,122,255,0.10)",
     padding: "6px 10px",
     borderRadius: 999,
@@ -934,20 +677,20 @@ const S = {
   pillSoft: {
     fontSize: 11,
     fontWeight: 900,
-    color: COLORS.text,
+    color: C.text,
     background: "rgba(60,60,67,0.08)",
     padding: "6px 10px",
     borderRadius: 999,
-    border: `1px solid ${COLORS.line}`,
+    border: `1px solid ${C.line}`,
   },
 
   editBtn: {
     padding: "10px 12px",
     borderRadius: 14,
-    border: `1px solid ${COLORS.line}`,
+    border: `1px solid ${C.line}`,
     background: "rgba(0,0,0,0.02)",
     fontWeight: 900,
-    color: COLORS.text,
+    color: C.text,
     cursor: "pointer",
     whiteSpace: "nowrap",
   },
@@ -959,39 +702,47 @@ const S = {
     gap: 10,
   },
   stat: {
-    background: COLORS.card,
+    background: C.surface,
     borderRadius: 16,
-    border: `1px solid ${COLORS.line}`,
-    boxShadow: `0 12px 30px ${COLORS.shadow}`,
+    border: `1px solid ${C.line}`,
+    boxShadow: `0 12px 30px ${C.shadow}`,
     padding: "10px 12px",
   },
-  statK: { fontSize: 11, color: COLORS.sub, fontWeight: 900, letterSpacing: 0.2 },
-  statV: { marginTop: 4, fontSize: 13, color: COLORS.text, fontWeight: 1000 },
+  statK: { fontSize: 11, color: C.sub, fontWeight: 900, letterSpacing: 0.2 },
+  statV: {
+    marginTop: 4,
+    fontSize: 13,
+    color: C.text,
+    fontWeight: 1000,
+    whiteSpace: "nowrap",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+  },
 
   sectionTitle: {
     margin: "0 6px 8px",
     fontSize: 12,
     fontWeight: 1000,
-    color: COLORS.sub,
+    color: C.sub,
     letterSpacing: 0.7,
   },
   sectionHint: {
     margin: "8px 10px 0",
     fontSize: 12,
-    color: COLORS.sub,
+    color: C.sub,
     fontWeight: 650,
     lineHeight: 1.35,
   },
 
   card: {
-    background: COLORS.card,
+    background: C.surface,
     borderRadius: 18,
-    border: `1px solid ${COLORS.line}`,
-    boxShadow: `0 18px 45px ${COLORS.shadow}`,
+    border: `1px solid ${C.line}`,
+    boxShadow: `0 18px 45px ${C.shadow}`,
     overflow: "hidden",
   },
 
-  divider: { height: 1, background: COLORS.line, marginLeft: 14 },
+  divider: { height: 1, background: C.line, marginLeft: 14 },
 
   rowBtn: {
     width: "100%",
@@ -1013,21 +764,9 @@ const S = {
   },
   rowLeft: { display: "flex", alignItems: "center", gap: 10, minWidth: 0 },
   rowRight: { display: "flex", alignItems: "center", gap: 6 },
-  rowTitle: { fontSize: 14, fontWeight: 900, color: COLORS.text },
-  rowSub: { marginTop: 2, fontSize: 12, color: COLORS.sub, fontWeight: 650 },
-  rowRightText: { fontSize: 12, color: COLORS.sub2, fontWeight: 900 },
-
-  iconWrap: {
-    width: 30,
-    height: 30,
-    borderRadius: 10,
-    background: "rgba(0,0,0,0.03)",
-    border: `1px solid ${COLORS.line}`,
-    display: "grid",
-    placeItems: "center",
-    flex: "0 0 auto",
-    fontSize: 15,
-  },
+  rowTitle: { fontSize: 14, fontWeight: 900, color: C.text },
+  rowSub: { marginTop: 2, fontSize: 12, color: C.sub, fontWeight: 650 },
+  rowRightText: { fontSize: 12, color: C.sub2, fontWeight: 900 },
 
   switch: {
     width: 50,
@@ -1061,29 +800,29 @@ const S = {
     width: "min(560px, 100%)",
     background: "rgba(255,255,255,0.92)",
     borderRadius: 20,
-    border: `1px solid ${COLORS.line}`,
+    border: `1px solid ${C.line}`,
     boxShadow: "0 40px 120px rgba(0,0,0,0.22)",
     backdropFilter: "blur(18px)",
     WebkitBackdropFilter: "blur(18px)",
     overflow: "hidden",
   },
-  modalTop: { padding: 14, borderBottom: `1px solid ${COLORS.line}` },
-  modalTitle: { fontSize: 14, fontWeight: 1000, color: COLORS.text, letterSpacing: -0.2 },
-  modalSub: { marginTop: 4, fontSize: 12, color: COLORS.sub, fontWeight: 650, lineHeight: 1.35 },
+  modalTop: { padding: 14, borderBottom: `1px solid ${C.line}` },
+  modalTitle: { fontSize: 14, fontWeight: 1000, color: C.text, letterSpacing: -0.2 },
+  modalSub: { marginTop: 4, fontSize: 12, color: C.sub, fontWeight: 650, lineHeight: 1.35 },
   modalBody: { padding: 14 },
 
-  fieldLabel: { fontSize: 12, color: COLORS.sub, fontWeight: 900, marginBottom: 6 },
+  fieldLabel: { fontSize: 12, color: C.sub, fontWeight: 900, marginBottom: 6 },
 
   input: {
     width: "100%",
     padding: 12,
     borderRadius: 14,
-    border: `1px solid ${COLORS.line}`,
+    border: `1px solid ${C.line}`,
     background: "#fff",
     outline: "none",
     fontSize: 14,
     fontWeight: 750,
-    color: COLORS.text,
+    color: C.text,
   },
 
   inlineMsg: {
@@ -1091,7 +830,7 @@ const S = {
     borderRadius: 14,
     background: "rgba(255,59,48,0.10)",
     border: "1px solid rgba(255,59,48,0.18)",
-    color: COLORS.text,
+    color: C.text,
     fontWeight: 800,
     fontSize: 13,
   },
@@ -1099,17 +838,17 @@ const S = {
   btnSoft: {
     padding: 12,
     borderRadius: 14,
-    border: `1px solid ${COLORS.line}`,
+    border: `1px solid ${C.line}`,
     background: "rgba(0,0,0,0.03)",
     fontWeight: 900,
-    color: COLORS.text,
+    color: C.text,
     cursor: "pointer",
   },
   btnAccent: {
     padding: 12,
     borderRadius: 14,
     border: "none",
-    background: COLORS.accent,
+    background: C.accent,
     fontWeight: 950,
     color: "#fff",
     cursor: "pointer",
@@ -1119,17 +858,18 @@ const S = {
     width: "100%",
     padding: 12,
     borderRadius: 14,
-    border: `1px solid ${COLORS.line}`,
+    border: `1px solid ${C.line}`,
     background: "rgba(0,0,0,0.03)",
     fontWeight: 900,
-    color: COLORS.text,
+    color: C.text,
     cursor: "pointer",
   },
-  btnDangerWide: {
+  btnAccentWide: {
     width: "100%",
     padding: 12,
     borderRadius: 14,
     border: "none",
+    background: C.accent,
     fontWeight: 950,
     color: "#fff",
     cursor: "pointer",
