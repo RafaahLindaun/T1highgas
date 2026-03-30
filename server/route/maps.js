@@ -140,22 +140,36 @@ router.post("/route-analysis", async (req, res) => {
       return res.status(400).json({ error: "Origem e destino são obrigatórios." });
     }
 
-    const coordinates = `${origin.lng},${origin.lat};${destination.lng},${destination.lat}`;
+    if (typeof fetch !== "function") {
+      return res.status(500).json({
+        error: "Seu Node não tem fetch nativo. Use Node 18+.",
+      });
+    }
 
+    const coordinates = `${origin.lng},${origin.lat};${destination.lng},${destination.lat}`;
     const url =
       `${OSRM_BASE}/route/v1/driving/${coordinates}` +
       `?alternatives=2` +
       `&steps=true` +
-      `&annotations=distance,duration,speed` +
       `&overview=full` +
       `&geometries=geojson`;
 
     const response = await fetch(url);
-    const data = await response.json();
+
+    const rawText = await response.text();
+
+    let data;
+    try {
+      data = JSON.parse(rawText);
+    } catch {
+      return res.status(502).json({
+        error: `OSRM respondeu algo inválido: ${rawText.slice(0, 180)}`,
+      });
+    }
 
     if (!response.ok || data.code !== "Ok") {
       return res.status(502).json({
-        error: data?.message || "Falha ao buscar rota real no OSRM.",
+        error: data?.message || data?.code || "Falha ao buscar rota real no OSRM.",
       });
     }
 
@@ -171,7 +185,9 @@ router.post("/route-analysis", async (req, res) => {
     return res.json({ routes });
   } catch (error) {
     console.error("route-analysis error:", error);
-    return res.status(500).json({ error: "Erro interno ao analisar rotas." });
+    return res.status(500).json({
+      error: error?.message || "Erro interno ao analisar rotas.",
+    });
   }
 });
 
