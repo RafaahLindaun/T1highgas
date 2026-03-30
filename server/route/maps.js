@@ -1,10 +1,11 @@
 import express from "express";
 
 const router = express.Router();
-const OSRM_BASE = "https://router.project-osrm.org";
+const GOOGLE_ROUTES_URL = "https://routes.googleapis.com/directions/v2:computeRoutes";
 
-function formatDuration(seconds) {
-  const mins = Math.round(seconds / 60);
+function formatDuration(durationStr) {
+  const totalSeconds = Number(String(durationStr || "0s").replace("s", ""));
+  const mins = Math.round(totalSeconds / 60);
   if (mins < 60) return `${mins} min`;
   const h = Math.floor(mins / 60);
   const m = mins % 60;
@@ -12,7 +13,7 @@ function formatDuration(seconds) {
 }
 
 function formatDistance(meters) {
-  const km = meters / 1000;
+  const km = Number(meters || 0) / 1000;
   return km < 10 ? `${km.toFixed(1)} km` : `${Math.round(km)} km`;
 }
 
@@ -24,8 +25,47 @@ function formatMoneyBRL(value) {
   return `R$ ${Number(value || 0).toFixed(2).replace(".", ",")}`;
 }
 
-function estimateFuelAndEco({ distanceMeters, durationSeconds, stepsCount, vehicle }) {
-  const distanceKm = distanceMeters / 1000;
+function decodePolyline(encoded) {
+  let index = 0;
+  const coordinates = [];
+  let lat = 0;
+  let lng = 0;
+
+  while (index < encoded.length) {
+    let b;
+    let shift = 0;
+    let result = 0;
+
+    do {
+      b = encoded.charCodeAt(index++) - 63;
+      result |= (b & 0x1f) << shift;
+      shift += 5;
+    } while (b >= 0x20);
+
+    const dlat = (result & 1) ? ~(result >> 1) : (result >> 1);
+    lat += dlat;
+
+    shift = 0;
+    result = 0;
+
+    do {
+      b = encoded.charCodeAt(index++) - 63;
+      result |= (b & 0x1f) << shift;
+      shift += 5;
+    } while (b >= 0x20);
+
+    const dlng = (result & 1) ? ~(result >> 1) : (result >> 1);
+    lng += dlng;
+
+    coordinates.push([lat / 1e5, lng / 1e5]);
+  }
+
+  return coordinates;
+}
+
+function estimateFuelAndEco({ distanceMeters, durationStr, stepsCount, vehicle, routeIndex }) {
+  const distanceKm = Number(distanceMeters || 0) / 1000;
+  const durationSeconds = Number(String(durationStr || "0s").replace("s", ""));
   const avgSpeedKmh = distanceKm / Math.max(durationSeconds / 3600, 0.1);
 
   let kmPerLiter;
@@ -48,12 +88,14 @@ function estimateFuelAndEco({ distanceMeters, durationSeconds, stepsCount, vehic
 
   const stepDensity = stepsCount / Math.max(distanceKm, 1);
   const stopGoPenalty = 1 + Math.min(stepDensity / 90, 0.16);
-
   const adjustedKmPerLiter = kmPerLiter / stopGoPenalty;
   const fuelLiters = distanceKm / Math.max(adjustedKmPerLiter, 3.5);
 
   const fuelPrice = Number(vehicle?.fuel_price || 5.89);
   const fuelCost = fuelLiters * fuelPrice;
+
+  const ascentMeters = Math.round(distanceKm * (routeIndex === 0 ? 8 : routeIndex === 1 ? 12 : 6));
+  const descentMeters = Math.round(ascentMeters * 0.82);
 
   let ecoScore = 100;
   ecoScore -= fuelLiters * 6;
@@ -61,74 +103,55 @@ function estimateFuelAndEco({ distanceMeters, durationSeconds, stepsCount, vehic
   ecoScore -= Math.min(stepDensity * 0.35, 10);
   ecoScore = Math.max(1, Math.round(ecoScore));
 
-  const estimatedLights = Math.max(0, Math.round(stepDensity * 0.35));
-
   return {
-    avgSpeedKmh: Number(avgSpeedKmh.toFixed(1)),
     fuelLiters: Number(fuelLiters.toFixed(2)),
     fuelCost: Number(fuelCost.toFixed(2)),
     ecoScore,
-    estimatedLights,
-  };
-}
-
-function estimateElevationHeuristic(routeIndex, distanceMeters, durationSeconds) {
-  const distanceKm = distanceMeters / 1000;
-  const avgSpeedKmh = distanceKm / Math.max(durationSeconds / 3600, 0.1);
-
-  const baseAscent =
-    routeIndex === 0 ? distanceKm * 8 : routeIndex === 1 ? distanceKm * 12 : distanceKm * 6;
-
-  const trafficFactor = avgSpeedKmh < 30 ? 1.15 : avgSpeedKmh < 50 ? 1.05 : 0.95;
-
-  const ascentMeters = Math.round(baseAscent * trafficFactor);
-  const descentMeters = Math.round(ascentMeters * 0.82);
-
-  return {
     ascentMeters,
     descentMeters,
-    ascentText: `${ascentMeters} m`,
-    descentText: `${descentMeters} m`,
   };
 }
 
 function normalizeRoute(route, index, vehicle) {
-  const distanceMeters = Number(route.distance || 0);
-  const durationSeconds = Number(route.duration || 0);
+  const encodedPolyline = route?.polyline?.encodedPolyline || "";
+  const polylineCoords = encodedPolyline ? decodePolyline(encodedPolyline) : [];
 
   const stepsCount =
-    Array.isArray(route.legs) && route.legs.length > 0
+    Array.isArray(route?.legs) && route.legs.length > 0
       ? route.legs.reduce((acc, leg) => acc + ((leg.steps || []).length || 0), 0)
       : 0;
 
   const fuel = estimateFuelAndEco({
-    distanceMeters,
-    durationSeconds,
+    distanceMeters: route.distanceMeters,
+    durationStr: route.duration,
     stepsCount,
     vehicle,
+    routeIndex: index,
   });
-
-  const elevation = estimateElevationHeuristic(index, distanceMeters, durationSeconds);
 
   return {
     id: `route-${index + 1}`,
-    label: index === 0 ? "Melhor rota" : index === 1 ? "Alternativa 1" : "Alternativa 2",
-    polylineCoords: route.geometry?.coordinates?.map(([lng, lat]) => [lat, lng]) || [],
-    distanceMeters,
-    durationSeconds,
-    distanceText: formatDistance(distanceMeters),
-    durationText: formatDuration(durationSeconds),
-    ascentMeters: elevation.ascentMeters,
-    descentMeters: elevation.descentMeters,
-    ascentText: elevation.ascentText,
-    descentText: elevation.descentText,
+    label:
+      index === 0
+        ? "Melhor rota"
+        : route.routeLabels?.includes("DEFAULT_ROUTE_ALTERNATE")
+        ? `Alternativa ${index}`
+        : `Rota ${index + 1}`,
+    distanceMeters: route.distanceMeters || 0,
+    duration: route.duration || "0s",
+    distanceText: formatDistance(route.distanceMeters || 0),
+    durationText: formatDuration(route.duration || "0s"),
+    polyline: encodedPolyline,
+    polylineCoords,
     fuelLiters: fuel.fuelLiters,
     fuelLitersText: formatLiters(fuel.fuelLiters),
     fuelCost: fuel.fuelCost,
     fuelCostText: formatMoneyBRL(fuel.fuelCost),
     ecoScore: fuel.ecoScore,
-    estimatedLights: fuel.estimatedLights,
-    avgSpeedKmh: fuel.avgSpeedKmh,
+    ascentMeters: fuel.ascentMeters,
+    descentMeters: fuel.descentMeters,
+    ascentText: `${fuel.ascentMeters} m`,
+    descentText: `${fuel.descentMeters} m`,
   };
 }
 
@@ -140,36 +163,59 @@ router.post("/route-analysis", async (req, res) => {
       return res.status(400).json({ error: "Origem e destino são obrigatórios." });
     }
 
-    if (typeof fetch !== "function") {
-      return res.status(500).json({
-        error: "Seu Node não tem fetch nativo. Use Node 18+.",
-      });
+    if (!process.env.GOOGLE_MAPS_API_KEY) {
+      return res.status(500).json({ error: "Falta GOOGLE_MAPS_API_KEY no backend." });
     }
 
-    const coordinates = `${origin.lng},${origin.lat};${destination.lng},${destination.lat}`;
-    const url =
-      `${OSRM_BASE}/route/v1/driving/${coordinates}` +
-      `?alternatives=2` +
-      `&steps=true` +
-      `&overview=full` +
-      `&geometries=geojson`;
+    const body = {
+      origin: {
+        location: {
+          latLng: {
+            latitude: origin.lat,
+            longitude: origin.lng,
+          },
+        },
+      },
+      destination: {
+        location: {
+          latLng: {
+            latitude: destination.lat,
+            longitude: destination.lng,
+          },
+        },
+      },
+      travelMode: "DRIVE",
+      routingPreference: "TRAFFIC_AWARE",
+      computeAlternativeRoutes: true,
+      languageCode: "pt-BR",
+      units: "METRIC",
+    };
 
-    const response = await fetch(url);
+    const response = await fetch(GOOGLE_ROUTES_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": process.env.GOOGLE_MAPS_API_KEY,
+        "X-Goog-FieldMask":
+          "routes.duration,routes.distanceMeters,routes.routeLabels,routes.polyline.encodedPolyline,routes.legs.steps",
+      },
+      body: JSON.stringify(body),
+    });
 
-    const rawText = await response.text();
+    const raw = await response.text();
 
     let data;
     try {
-      data = JSON.parse(rawText);
+      data = JSON.parse(raw);
     } catch {
-      return res.status(502).json({
-        error: `OSRM respondeu algo inválido: ${rawText.slice(0, 180)}`,
-      });
+      return res.status(502).json({ error: `Resposta inválida do Google Routes: ${raw.slice(0, 180)}` });
     }
 
-    if (!response.ok || data.code !== "Ok") {
-      return res.status(502).json({
-        error: data?.message || data?.code || "Falha ao buscar rota real no OSRM.",
+    if (!response.ok) {
+      return res.status(response.status).json({
+        error:
+          data?.error?.message ||
+          "Falha ao consultar Google Routes API.",
       });
     }
 
