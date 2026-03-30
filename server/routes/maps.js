@@ -2,40 +2,49 @@ import express from "express";
 
 const router = express.Router();
 
-function toRad(value) {
-  return (value * Math.PI) / 180;
-}
-
-function haversineKm(a, b) {
-  const R = 6371;
-  const dLat = toRad(b.lat - a.lat);
-  const dLng = toRad(b.lng - a.lng);
-
-  const aa =
-    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos(toRad(a.lat)) * Math.cos(toRad(b.lat)) *
-    Math.sin(dLng / 2) * Math.sin(dLng / 2);
-
-  const c = 2 * Math.atan2(Math.sqrt(aa), Math.sqrt(1 - aa));
-  return R * c;
-}
+const OSRM_BASE = "https://router.project-osrm.org";
 
 function formatDuration(seconds) {
   const mins = Math.round(seconds / 60);
   if (mins < 60) return `${mins} min`;
+
   const h = Math.floor(mins / 60);
   const m = mins % 60;
+
+  if (m === 0) return `${h}h`;
   return `${h}h ${m}min`;
 }
 
-function buildFuelEstimate({ distanceKm, durationSeconds, vehicle, routeIndex }) {
+function formatDistance(meters) {
+  const km = meters / 1000;
+  if (km < 10) return `${km.toFixed(1)} km`;
+  return `${Math.round(km)} km`;
+}
+
+function formatLiters(value) {
+  return `${Number(value || 0).toFixed(2)} L`;
+}
+
+function formatMoneyBRL(value) {
+  return `R$ ${Number(value || 0).toFixed(2).replace(".", ",")}`;
+}
+
+function estimateFuelAndEco({ distanceMeters, durationSeconds, stepsCount, vehicle }) {
+  const distanceKm = distanceMeters / 1000;
   const avgSpeedKmh = distanceKm / Math.max(durationSeconds / 3600, 0.1);
 
   let kmPerLiter;
 
-  if (vehicle?.city_km_l && vehicle?.hwy_km_l) {
-    const urbanFactor = avgSpeedKmh < 35 ? 0.78 : avgSpeedKmh < 60 ? 0.5 : 0.22;
-    kmPerLiter = vehicle.city_km_l * urbanFactor + vehicle.hwy_km_l * (1 - urbanFactor);
+  if (
+    vehicle &&
+    Number.isFinite(Number(vehicle.city_km_l)) &&
+    Number.isFinite(Number(vehicle.hwy_km_l))
+  ) {
+    const city = Number(vehicle.city_km_l);
+    const hwy = Number(vehicle.hwy_km_l);
+
+    const urbanFactor = avgSpeedKmh < 30 ? 0.82 : avgSpeedKmh < 55 ? 0.5 : 0.2;
+    kmPerLiter = city * urbanFactor + hwy * (1 - urbanFactor);
   } else {
     if (avgSpeedKmh < 25) kmPerLiter = 8.5;
     else if (avgSpeedKmh < 40) kmPerLiter = 10.5;
@@ -43,108 +52,90 @@ function buildFuelEstimate({ distanceKm, durationSeconds, vehicle, routeIndex })
     else kmPerLiter = 14.2;
   }
 
-  const ascentMeters = Math.round(distanceKm * (routeIndex === 0 ? 9 : routeIndex === 1 ? 13 : 7));
-  const descentMeters = Math.round(distanceKm * (routeIndex === 0 ? 7 : routeIndex === 1 ? 9 : 8));
+  const stepDensity = stepsCount / Math.max(distanceKm, 1);
+  const stopGoPenalty = 1 + Math.min(stepDensity / 90, 0.16);
 
-  const ascentPenalty = 1 + Math.min(ascentMeters / 1000, 0.2);
-  const trafficPenalty = avgSpeedKmh < 30 ? 1.14 : avgSpeedKmh < 45 ? 1.08 : 1.02;
-
-  const adjustedKmPerLiter = kmPerLiter / (ascentPenalty * trafficPenalty);
+  const adjustedKmPerLiter = kmPerLiter / stopGoPenalty;
   const fuelLiters = distanceKm / Math.max(adjustedKmPerLiter, 3.5);
+
   const fuelPrice = Number(vehicle?.fuel_price || 5.89);
   const fuelCost = fuelLiters * fuelPrice;
 
   let ecoScore = 100;
   ecoScore -= fuelLiters * 6;
-  ecoScore -= ascentMeters / 140;
   ecoScore -= avgSpeedKmh < 30 ? 7 : avgSpeedKmh < 45 ? 3 : 0;
+  ecoScore -= Math.min(stepDensity * 0.35, 10);
   ecoScore = Math.max(1, Math.round(ecoScore));
+
+  const estimatedLights = Math.max(0, Math.round(stepDensity * 0.35));
+
+  return {
+    avgSpeedKmh: Number(avgSpeedKmh.toFixed(1)),
+    fuelLiters: Number(fuelLiters.toFixed(2)),
+    fuelCost: Number(fuelCost.toFixed(2)),
+    ecoScore,
+    estimatedLights,
+  };
+}
+
+function estimateElevationHeuristic(routeIndex, distanceMeters, durationSeconds) {
+  const distanceKm = distanceMeters / 1000;
+  const avgSpeedKmh = distanceKm / Math.max(durationSeconds / 3600, 0.1);
+
+  const baseAscent =
+    routeIndex === 0 ? distanceKm * 8 : routeIndex === 1 ? distanceKm * 12 : distanceKm * 6;
+
+  const trafficFactor = avgSpeedKmh < 30 ? 1.15 : avgSpeedKmh < 50 ? 1.05 : 0.95;
+
+  const ascentMeters = Math.round(baseAscent * trafficFactor);
+  const descentMeters = Math.round(ascentMeters * 0.82);
 
   return {
     ascentMeters,
     descentMeters,
-    fuelLiters: Number(fuelLiters.toFixed(2)),
-    fuelCost: Number(fuelCost.toFixed(2)),
-    ecoScore,
+    ascentText: `${ascentMeters} m`,
+    descentText: `${descentMeters} m`,
   };
 }
 
-function buildMockAlternativeRoutes(origin, destination, vehicle) {
-  const distanceKm = haversineKm(origin, destination);
+function normalizeRoute(route, index, vehicle) {
+  const distanceMeters = Number(route.distance || 0);
+  const durationSeconds = Number(route.duration || 0);
 
-  const baseDurationSec = Math.round((distanceKm / 38) * 3600);
-  const alt1DurationSec = Math.round(baseDurationSec * 1.12);
-  const alt2DurationSec = Math.round(baseDurationSec * 0.95);
+  const stepsCount =
+    Array.isArray(route.legs) && route.legs.length > 0
+      ? route.legs.reduce((acc, leg) => acc + ((leg.steps || []).length || 0), 0)
+      : 0;
 
-  const polylineA = [
-    [origin.lat, origin.lng],
-    [(origin.lat + destination.lat) / 2 + 0.01, (origin.lng + destination.lng) / 2 - 0.01],
-    [destination.lat, destination.lng],
-  ];
-
-  const polylineB = [
-    [origin.lat, origin.lng],
-    [(origin.lat + destination.lat) / 2 - 0.015, (origin.lng + destination.lng) / 2 + 0.008],
-    [destination.lat, destination.lng],
-  ];
-
-  const polylineC = [
-    [origin.lat, origin.lng],
-    [(origin.lat + destination.lat) / 2 + 0.005, (origin.lng + destination.lng) / 2 + 0.018],
-    [destination.lat, destination.lng],
-  ];
-
-  const routeDefs = [
-    {
-      id: "route-1",
-      label: "Melhor rota",
-      distanceKm: Number(distanceKm.toFixed(1)),
-      durationSeconds: baseDurationSec,
-      polylineCoords: polylineA,
-    },
-    {
-      id: "route-2",
-      label: "Menos trânsito",
-      distanceKm: Number((distanceKm * 1.06).toFixed(1)),
-      durationSeconds: alt1DurationSec,
-      polylineCoords: polylineB,
-    },
-    {
-      id: "route-3",
-      label: "Mais rápida",
-      distanceKm: Number((distanceKm * 1.12).toFixed(1)),
-      durationSeconds: alt2DurationSec,
-      polylineCoords: polylineC,
-    },
-  ];
-
-  return routeDefs.map((route, index) => {
-    const fuel = buildFuelEstimate({
-      distanceKm: route.distanceKm,
-      durationSeconds: route.durationSeconds,
-      vehicle,
-      routeIndex: index,
-    });
-
-    return {
-      id: route.id,
-      label: route.label,
-      polylineCoords: route.polylineCoords,
-      distanceMeters: Math.round(route.distanceKm * 1000),
-      durationSeconds: route.durationSeconds,
-      distanceText: `${route.distanceKm.toFixed(1)} km`,
-      durationText: formatDuration(route.durationSeconds),
-      ascentMeters: fuel.ascentMeters,
-      descentMeters: fuel.descentMeters,
-      ascentText: `${fuel.ascentMeters} m`,
-      descentText: `${fuel.descentMeters} m`,
-      fuelLiters: fuel.fuelLiters,
-      fuelLitersText: `${fuel.fuelLiters.toFixed(2)} L`,
-      fuelCost: fuel.fuelCost,
-      fuelCostText: `R$ ${fuel.fuelCost.toFixed(2).replace(".", ",")}`,
-      ecoScore: fuel.ecoScore,
-    };
+  const fuel = estimateFuelAndEco({
+    distanceMeters,
+    durationSeconds,
+    stepsCount,
+    vehicle,
   });
+
+  const elevation = estimateElevationHeuristic(index, distanceMeters, durationSeconds);
+
+  return {
+    id: `route-${index + 1}`,
+    label: index === 0 ? "Melhor rota" : index === 1 ? "Alternativa 1" : "Alternativa 2",
+    polylineCoords: route.geometry?.coordinates?.map(([lng, lat]) => [lat, lng]) || [],
+    distanceMeters,
+    durationSeconds,
+    distanceText: formatDistance(distanceMeters),
+    durationText: formatDuration(durationSeconds),
+    ascentMeters: elevation.ascentMeters,
+    descentMeters: elevation.descentMeters,
+    ascentText: elevation.ascentText,
+    descentText: elevation.descentText,
+    fuelLiters: fuel.fuelLiters,
+    fuelLitersText: formatLiters(fuel.fuelLiters),
+    fuelCost: fuel.fuelCost,
+    fuelCostText: formatMoneyBRL(fuel.fuelCost),
+    ecoScore: fuel.ecoScore,
+    estimatedLights: fuel.estimatedLights,
+    avgSpeedKmh: fuel.avgSpeedKmh,
+  };
 }
 
 router.post("/route-analysis", async (req, res) => {
@@ -155,10 +146,33 @@ router.post("/route-analysis", async (req, res) => {
       return res.status(400).json({ error: "Origem e destino são obrigatórios." });
     }
 
-    // MVP inicial:
-    // aqui está mockado de forma consistente para você testar a interface.
-    // Depois trocamos esse bloco por Google Routes / OSRM / Mapbox.
-    const routes = buildMockAlternativeRoutes(origin, destination, vehicle);
+    const coordinates = `${origin.lng},${origin.lat};${destination.lng},${destination.lat}`;
+
+    const url =
+      `${OSRM_BASE}/route/v1/driving/${coordinates}` +
+      `?alternatives=2` +
+      `&steps=true` +
+      `&annotations=distance,duration,speed` +
+      `&overview=full` +
+      `&geometries=geojson`;
+
+    const response = await fetch(url);
+    const data = await response.json();
+
+    if (!response.ok || data.code !== "Ok") {
+      return res.status(502).json({
+        error: data?.message || "Falha ao buscar rota real no OSRM.",
+      });
+    }
+
+    const routes = (data.routes || [])
+      .slice(0, 3)
+      .map((route, index) => normalizeRoute(route, index, vehicle))
+      .filter((route) => route.polylineCoords.length > 1);
+
+    if (!routes.length) {
+      return res.status(404).json({ error: "Nenhuma rota encontrada." });
+    }
 
     return res.json({ routes });
   } catch (error) {
