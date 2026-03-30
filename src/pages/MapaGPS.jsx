@@ -90,6 +90,15 @@ function formatMoneyBRL(value) {
   }).format(Number(value || 0));
 }
 
+function Info({ title, value }) {
+  return (
+    <div style={styles.infoCell}>
+      <div style={styles.infoCellTitle}>{title}</div>
+      <div style={styles.infoCellValue}>{value}</div>
+    </div>
+  );
+}
+
 export default function MapaGPS() {
   const mapRef = useRef(null);
   const mapInstanceRef = useRef(null);
@@ -103,6 +112,8 @@ export default function MapaGPS() {
   const [loadingSuggestions, setLoadingSuggestions] = useState(false);
 
   const [currentLocation, setCurrentLocation] = useState(null);
+  const [selectedDestination, setSelectedDestination] = useState(null);
+
   const [routes, setRoutes] = useState([]);
   const [selectedRouteIndex, setSelectedRouteIndex] = useState(0);
 
@@ -192,7 +203,7 @@ export default function MapaGPS() {
             { headers: { Accept: "application/json" } }
           );
 
-          if (!response.ok) throw new Error();
+          if (!response.ok) throw new Error("Falha ao buscar endereço");
 
           const data = await response.json();
 
@@ -247,7 +258,7 @@ export default function MapaGPS() {
 
     if (bounds.isValid()) {
       map.fitBounds(bounds, {
-        paddingTopLeft: [20, 220],
+        paddingTopLeft: [20, 260],
         paddingBottomRight: [20, 100],
       });
     }
@@ -289,6 +300,7 @@ export default function MapaGPS() {
     setSearchOpen(false);
     setStatusText("Destino selecionado");
     setError("");
+    setSelectedDestination(item);
 
     const map = mapInstanceRef.current;
     const L = window.L;
@@ -355,6 +367,13 @@ export default function MapaGPS() {
     const map = mapInstanceRef.current;
     if (!map || !currentLocation) return;
     map.setView([currentLocation.lat, currentLocation.lng], 16);
+  }
+
+  function openWaze() {
+    if (!selectedDestination) return;
+    const lat = selectedDestination.lat;
+    const lng = selectedDestination.lon;
+    window.open(`https://waze.com/ul?ll=${lat},${lng}&navigate=yes`, "_blank");
   }
 
   const activeRoute = routes[selectedRouteIndex] || null;
@@ -518,6 +537,20 @@ export default function MapaGPS() {
                           {route.fuelCostText || formatMoneyBRL(route.fuelCost)}
                         </span>
                       </div>
+
+                      <div style={styles.routeMiniItem}>
+                        <span style={styles.routeMiniLabel}>Subida</span>
+                        <span style={styles.routeMiniValue}>
+                          {route.ascentText || "-"}
+                        </span>
+                      </div>
+
+                      <div style={styles.routeMiniItem}>
+                        <span style={styles.routeMiniLabel}>Eco</span>
+                        <span style={styles.routeMiniValue}>
+                          {route.ecoScore ?? "-"}
+                        </span>
+                      </div>
                     </div>
                   </button>
                 );
@@ -537,6 +570,18 @@ export default function MapaGPS() {
                   title="Custo"
                   value={activeRoute.fuelCostText || formatMoneyBRL(activeRoute.fuelCost)}
                 />
+                <Info title="Altimetria +" value={activeRoute.ascentText || "-"} />
+                <Info title="Altimetria -" value={activeRoute.descentText || "-"} />
+              </div>
+
+              <div style={{ marginTop: 10 }}>
+                <button
+                  type="button"
+                  style={styles.primaryButton}
+                  onClick={openWaze}
+                >
+                  Abrir no Waze
+                </button>
               </div>
             </div>
           )}
@@ -544,15 +589,6 @@ export default function MapaGPS() {
       </div>
 
       {error ? <div style={styles.errorToast}>{error}</div> : null}
-    </div>
-  );
-}
-
-function Info({ title, value }) {
-  return (
-    <div style={styles.infoCell}>
-      <div style={styles.infoCellTitle}>{title}</div>
-      <div style={styles.infoCellValue}>{value}</div>
     </div>
   );
 }
