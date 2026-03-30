@@ -94,7 +94,6 @@ function formatMoneyBRL(value) {
 
 function fitMapToRoutes(map, L, routes) {
   const bounds = L.latLngBounds([]);
-
   routes.forEach((route) => {
     (route.polylineCoords || []).forEach((point) => bounds.extend(point));
   });
@@ -105,6 +104,15 @@ function fitMapToRoutes(map, L, routes) {
       paddingBottomRight: [20, 110],
     });
   }
+}
+
+function Info({ title, value, styles }) {
+  return (
+    <div style={styles.infoCell}>
+      <div style={styles.infoCellTitle}>{title}</div>
+      <div style={styles.infoCellValue}>{value}</div>
+    </div>
+  );
 }
 
 export default function MapaGPS() {
@@ -118,14 +126,10 @@ export default function MapaGPS() {
   const [query, setQuery] = useState("");
   const [suggestions, setSuggestions] = useState([]);
   const [loadingSuggestions, setLoadingSuggestions] = useState(false);
-
   const [currentLocation, setCurrentLocation] = useState(null);
-  const [selectedPlace, setSelectedPlace] = useState(null);
-
   const [routes, setRoutes] = useState([]);
   const [selectedRouteIndex, setSelectedRouteIndex] = useState(0);
   const [loadingRoutes, setLoadingRoutes] = useState(false);
-
   const [statusText, setStatusText] = useState("");
   const [error, setError] = useState("");
 
@@ -137,7 +141,6 @@ export default function MapaGPS() {
         if (cancelled || !mapRef.current || mapInstanceRef.current) return;
 
         const defaultCenter = [-23.55052, -46.633308];
-
         const map = L.map(mapRef.current, {
           zoomControl: false,
           preferCanvas: true,
@@ -166,9 +169,7 @@ export default function MapaGPS() {
 
               map.setView([coords.lat, coords.lng], 16);
 
-              if (userMarkerRef.current) {
-                userMarkerRef.current.remove();
-              }
+              if (userMarkerRef.current) userMarkerRef.current.remove();
 
               userMarkerRef.current = L.circleMarker([coords.lat, coords.lng], {
                 radius: 8,
@@ -178,20 +179,12 @@ export default function MapaGPS() {
                 weight: 3,
               }).addTo(map);
             },
-            () => {
-              setStatusText("Usando mapa padrão");
-            },
-            {
-              enableHighAccuracy: true,
-              timeout: 10000,
-              maximumAge: 5000,
-            }
+            () => setStatusText("Usando mapa padrão"),
+            { enableHighAccuracy: true, timeout: 10000, maximumAge: 5000 }
           );
         }
       })
-      .catch(() => {
-        setError("Não foi possível carregar o mapa.");
-      });
+      .catch(() => setError("Não foi possível carregar o mapa."));
 
     return () => {
       cancelled = true;
@@ -241,14 +234,11 @@ export default function MapaGPS() {
 
   const handleChangeQuery = (value) => {
     setQuery(value);
-    setSelectedPlace(null);
-
     if (!value.trim()) {
       setSuggestions([]);
       setLoadingSuggestions(false);
       return;
     }
-
     setLoadingSuggestions(true);
     requestSuggestions(value);
   };
@@ -285,13 +275,10 @@ export default function MapaGPS() {
   };
 
   useEffect(() => {
-    if (routes.length > 0) {
-      renderRoutes(routes, selectedRouteIndex);
-    }
+    if (routes.length > 0) renderRoutes(routes, selectedRouteIndex);
   }, [routes, selectedRouteIndex]);
 
   const handleSelectSuggestion = async (item) => {
-    setSelectedPlace(item);
     setQuery(item.label);
     setSuggestions([]);
     setSearchOpen(false);
@@ -302,7 +289,6 @@ export default function MapaGPS() {
 
     if (map && L) {
       if (destinationMarkerRef.current) destinationMarkerRef.current.remove();
-
       destinationMarkerRef.current = L.marker([item.lat, item.lon]).addTo(map);
       map.setView([item.lat, item.lon], 16);
     }
@@ -321,25 +307,17 @@ export default function MapaGPS() {
 
       const response = await fetch("/api/maps/route-analysis", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           origin: currentLocation,
-          destination: {
-            lat: item.lat,
-            lng: item.lon,
-            label: item.label,
-          },
+          destination: { lat: item.lat, lng: item.lon, label: item.label },
           vehicle: savedVehicle,
         }),
       });
 
       const data = await response.json();
 
-      if (!response.ok) {
-        throw new Error(data?.error || "Erro ao buscar rotas.");
-      }
+      if (!response.ok) throw new Error(data?.error || "Erro ao buscar rotas.");
 
       const normalizedRoutes = (data.routes || []).map((route, index) => ({
         ...route,
@@ -367,6 +345,235 @@ export default function MapaGPS() {
 
   const activeRoute = routes[selectedRouteIndex] || null;
 
+  const styles = {
+    mainContainer: {
+      position: "relative",
+      width: "100%",
+      height: "100dvh",
+      minHeight: "100dvh",
+      background: C.bg,
+      overflow: "hidden",
+      WebkitTapHighlightColor: "transparent",
+    },
+    map: { position: "absolute", inset: 0, width: "100%", height: "100%" },
+    topWrap: {
+      position: "absolute",
+      top: "max(12px, env(safe-area-inset-top))",
+      left: 0,
+      right: 0,
+      zIndex: 1000,
+      display: "flex",
+      flexDirection: "column",
+      alignItems: "center",
+      gap: 10,
+      padding: "0 12px",
+      pointerEvents: "none",
+    },
+    searchShell: {
+      minHeight: 56,
+      background: "rgba(255,255,255,0.94)",
+      backdropFilter: "blur(18px)",
+      WebkitBackdropFilter: "blur(18px)",
+      border: `1px solid ${C.line}`,
+      boxShadow: `0 10px 30px ${C.shadow}`,
+      overflow: "hidden",
+      transition: "width 220ms ease, border-radius 220ms ease",
+      pointerEvents: "auto",
+    },
+    searchButtonOnly: {
+      width: 56,
+      height: 56,
+      border: "none",
+      background: "transparent",
+      color: C.text,
+      display: "grid",
+      placeItems: "center",
+      cursor: "pointer",
+    },
+    searchRow: { display: "flex", alignItems: "center", minHeight: 56, padding: "0 8px" },
+    leftIconWrap: {
+      width: 40,
+      height: 40,
+      display: "grid",
+      placeItems: "center",
+      color: C.text,
+      flexShrink: 0,
+    },
+    input: {
+      flex: 1,
+      height: 44,
+      border: "none",
+      outline: "none",
+      background: "transparent",
+      color: C.text,
+      fontSize: 16,
+      fontWeight: 600,
+    },
+    closeButton: {
+      width: 36,
+      height: 36,
+      borderRadius: 18,
+      border: "none",
+      background: C.bg,
+      color: C.text,
+      fontSize: 24,
+      lineHeight: 1,
+      cursor: "pointer",
+      flexShrink: 0,
+    },
+    suggestionBox: {
+      borderTop: `1px solid ${C.line}`,
+      background: "rgba(255,255,255,0.98)",
+      maxHeight: "38dvh",
+      overflowY: "auto",
+      WebkitOverflowScrolling: "touch",
+    },
+    loadingItem: { padding: "14px 16px", fontSize: 14, color: C.sub },
+    suggestionItem: {
+      width: "100%",
+      border: "none",
+      background: "transparent",
+      padding: "12px 14px",
+      display: "flex",
+      alignItems: "flex-start",
+      gap: 10,
+      textAlign: "left",
+      cursor: "pointer",
+    },
+    suggestionIcon: { marginTop: 2, color: C.accent, flexShrink: 0 },
+    suggestionTexts: { minWidth: 0, flex: 1 },
+    suggestionMain: { color: C.text, fontSize: 14, fontWeight: 800, lineHeight: 1.2 },
+    suggestionSub: { marginTop: 3, color: C.sub2, fontSize: 12, lineHeight: 1.35 },
+    topInfoStack: {
+      width: "min(92vw, 560px)",
+      display: "flex",
+      flexDirection: "column",
+      gap: 10,
+      pointerEvents: "auto",
+    },
+    statusCard: {
+      background: "rgba(255,255,255,0.94)",
+      backdropFilter: "blur(18px)",
+      WebkitBackdropFilter: "blur(18px)",
+      border: `1px solid ${C.line}`,
+      borderRadius: 22,
+      boxShadow: `0 10px 30px ${C.shadow}`,
+      padding: 12,
+    },
+    statusLine: {
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "space-between",
+      gap: 10,
+      marginBottom: 10,
+    },
+    statusLabel: {
+      fontSize: 12,
+      fontWeight: 700,
+      color: C.sub,
+      textTransform: "uppercase",
+      letterSpacing: "0.04em",
+    },
+    statusValue: { fontSize: 14, fontWeight: 800, color: C.text, textAlign: "right" },
+    statusActions: { display: "flex", gap: 8, flexWrap: "wrap" },
+    primaryButton: {
+      height: 40,
+      border: "none",
+      borderRadius: 999,
+      background: C.accent,
+      color: "#fff",
+      padding: "0 16px",
+      fontSize: 14,
+      fontWeight: 800,
+      cursor: "pointer",
+    },
+    secondaryButton: {
+      height: 40,
+      borderRadius: 999,
+      border: `1px solid ${C.line}`,
+      background: C.surface,
+      color: C.text,
+      padding: "0 16px",
+      fontSize: 14,
+      fontWeight: 700,
+      cursor: "pointer",
+    },
+    routeScroller: {
+      display: "flex",
+      gap: 10,
+      overflowX: "auto",
+      paddingBottom: 2,
+      WebkitOverflowScrolling: "touch",
+    },
+    routeCard: {
+      minWidth: 220,
+      maxWidth: 220,
+      borderRadius: 22,
+      border: "1.5px solid",
+      background: "rgba(255,255,255,0.96)",
+      padding: 12,
+      textAlign: "left",
+      cursor: "pointer",
+    },
+    routeTopRow: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 },
+    routeTitle: { fontSize: 14, fontWeight: 800, color: C.text },
+    routeBadge: {
+      height: 24,
+      minWidth: 46,
+      padding: "0 10px",
+      borderRadius: 999,
+      display: "inline-flex",
+      alignItems: "center",
+      justifyContent: "center",
+      fontSize: 11,
+      fontWeight: 800,
+    },
+    routeMainMetrics: { marginTop: 10, display: "flex", flexDirection: "column", gap: 2 },
+    metricBig: { fontSize: 22, fontWeight: 900, color: C.text, lineHeight: 1 },
+    metricSmall: { fontSize: 13, fontWeight: 700, color: C.sub },
+    routeMiniGrid: {
+      marginTop: 12,
+      display: "grid",
+      gridTemplateColumns: "repeat(2, minmax(0,1fr))",
+      gap: 8,
+    },
+    routeMiniItem: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 3,
+      padding: 8,
+      borderRadius: 14,
+      background: C.bg,
+    },
+    routeMiniLabel: { fontSize: 11, fontWeight: 700, color: C.sub2 },
+    routeMiniValue: { fontSize: 13, fontWeight: 800, color: C.text },
+    activeRouteCard: {
+      background: "rgba(255,255,255,0.96)",
+      border: `1px solid ${C.line}`,
+      borderRadius: 22,
+      boxShadow: `0 10px 30px ${C.shadow}`,
+      padding: 12,
+    },
+    activeRouteTitle: { fontSize: 14, fontWeight: 800, color: C.text, marginBottom: 10 },
+    activeGrid: { display: "grid", gridTemplateColumns: "repeat(2, minmax(0,1fr))", gap: 8 },
+    infoCell: { background: C.bg, borderRadius: 14, padding: 10 },
+    infoCellTitle: { fontSize: 11, fontWeight: 700, color: C.sub2, marginBottom: 4 },
+    infoCellValue: { fontSize: 14, fontWeight: 800, color: C.text },
+    errorToast: {
+      position: "absolute",
+      left: 12,
+      right: 12,
+      top: "calc(max(12px, env(safe-area-inset-top)) + 430px)",
+      zIndex: 1200,
+      background: C.danger,
+      color: "#fff",
+      padding: "12px 14px",
+      borderRadius: 14,
+      fontSize: 13,
+      fontWeight: 700,
+    },
+  };
+
   return (
     <div style={styles.mainContainer}>
       <div ref={mapRef} style={styles.map} />
@@ -380,12 +587,7 @@ export default function MapaGPS() {
           }}
         >
           {!searchOpen ? (
-            <button
-              type="button"
-              onClick={() => setSearchOpen(true)}
-              style={styles.searchButtonOnly}
-              aria-label="Abrir busca"
-            >
+            <button type="button" onClick={() => setSearchOpen(true)} style={styles.searchButtonOnly} aria-label="Abrir busca">
               <SearchIcon color={C.text} />
             </button>
           ) : (
@@ -426,16 +628,10 @@ export default function MapaGPS() {
 
                   {!loadingSuggestions &&
                     suggestions.map((item) => (
-                      <button
-                        key={item.id}
-                        type="button"
-                        onClick={() => handleSelectSuggestion(item)}
-                        style={styles.suggestionItem}
-                      >
+                      <button key={item.id} type="button" onClick={() => handleSelectSuggestion(item)} style={styles.suggestionItem}>
                         <div style={styles.suggestionIcon}>
                           <PinIcon />
                         </div>
-
                         <div style={styles.suggestionTexts}>
                           <div style={styles.suggestionMain}>{item.label.split(",")[0]}</div>
                           <div style={styles.suggestionSub}>{item.label}</div>
@@ -452,9 +648,7 @@ export default function MapaGPS() {
           <div style={styles.statusCard}>
             <div style={styles.statusLine}>
               <span style={styles.statusLabel}>Status</span>
-              <span style={styles.statusValue}>
-                {loadingRoutes ? "Analisando..." : statusText || "Pronto"}
-              </span>
+              <span style={styles.statusValue}>{loadingRoutes ? "Analisando..." : statusText || "Pronto"}</span>
             </div>
 
             <div style={styles.statusActions}>
@@ -508,9 +702,7 @@ export default function MapaGPS() {
                       </div>
                       <div style={styles.routeMiniItem}>
                         <span style={styles.routeMiniLabel}>Custo</span>
-                        <span style={styles.routeMiniValue}>
-                          {route.fuelCostText || formatMoneyBRL(route.fuelCost)}
-                        </span>
+                        <span style={styles.routeMiniValue}>{route.fuelCostText || formatMoneyBRL(route.fuelCost)}</span>
                       </div>
                       <div style={styles.routeMiniItem}>
                         <span style={styles.routeMiniLabel}>Subida</span>
@@ -530,17 +722,13 @@ export default function MapaGPS() {
           {activeRoute && (
             <div style={styles.activeRouteCard}>
               <div style={styles.activeRouteTitle}>Resumo da rota ativa</div>
-
               <div style={styles.activeGrid}>
-                <Info title="Tempo" value={activeRoute.durationText || "-"} />
-                <Info title="Distância" value={activeRoute.distanceText || "-"} />
-                <Info title="Combustível" value={activeRoute.fuelLitersText || "-"} />
-                <Info
-                  title="Custo"
-                  value={activeRoute.fuelCostText || formatMoneyBRL(activeRoute.fuelCost)}
-                />
-                <Info title="Altimetria +" value={activeRoute.ascentText || "-"} />
-                <Info title="Altimetria -" value={activeRoute.descentText || "-"} />
+                <Info title="Tempo" value={activeRoute.durationText || "-"} styles={styles} />
+                <Info title="Distância" value={activeRoute.distanceText || "-"} styles={styles} />
+                <Info title="Combustível" value={activeRoute.fuelLitersText || "-"} styles={styles} />
+                <Info title="Custo" value={activeRoute.fuelCostText || formatMoneyBRL(activeRoute.fuelCost)} styles={styles} />
+                <Info title="Altimetria +" value={activeRoute.ascentText || "-"} styles={styles} />
+                <Info title="Altimetria -" value={activeRoute.descentText || "-"} styles={styles} />
               </div>
             </div>
           )}
@@ -551,376 +739,3 @@ export default function MapaGPS() {
     </div>
   );
 }
-
-function Info({ title, value }) {
-  return (
-    <div style={styles.infoCell}>
-      <div style={styles.infoCellTitle}>{title}</div>
-      <div style={styles.infoCellValue}>{value}</div>
-    </div>
-  );
-}
-
-const styles = {
-  mainContainer: {
-    position: "relative",
-    width: "100%",
-    height: "100dvh",
-    minHeight: "100dvh",
-    background: C.bg,
-    overflow: "hidden",
-    WebkitTapHighlightColor: "transparent",
-  },
-
-  map: {
-    position: "absolute",
-    inset: 0,
-    width: "100%",
-    height: "100%",
-  },
-
-  topWrap: {
-    position: "absolute",
-    top: "max(12px, env(safe-area-inset-top))",
-    left: 0,
-    right: 0,
-    zIndex: 1000,
-    display: "flex",
-    flexDirection: "column",
-    alignItems: "center",
-    gap: 10,
-    padding: "0 12px",
-    pointerEvents: "none",
-  },
-
-  searchShell: {
-    minHeight: 56,
-    background: "rgba(255,255,255,0.94)",
-    backdropFilter: "blur(18px)",
-    WebkitBackdropFilter: "blur(18px)",
-    border: `1px solid ${C.line}`,
-    boxShadow: `0 10px 30px ${C.shadow}`,
-    overflow: "hidden",
-    transition: "width 220ms ease, border-radius 220ms ease",
-    pointerEvents: "auto",
-  },
-
-  searchButtonOnly: {
-    width: 56,
-    height: 56,
-    border: "none",
-    background: "transparent",
-    color: C.text,
-    display: "grid",
-    placeItems: "center",
-    cursor: "pointer",
-  },
-
-  searchRow: {
-    display: "flex",
-    alignItems: "center",
-    minHeight: 56,
-    padding: "0 8px",
-  },
-
-  leftIconWrap: {
-    width: 40,
-    height: 40,
-    display: "grid",
-    placeItems: "center",
-    color: C.text,
-    flexShrink: 0,
-  },
-
-  input: {
-    flex: 1,
-    height: 44,
-    border: "none",
-    outline: "none",
-    background: "transparent",
-    color: C.text,
-    fontSize: 16,
-    fontWeight: 600,
-  },
-
-  closeButton: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    border: "none",
-    background: C.bg,
-    color: C.text,
-    fontSize: 24,
-    lineHeight: 1,
-    cursor: "pointer",
-    flexShrink: 0,
-  },
-
-  suggestionBox: {
-    borderTop: `1px solid ${C.line}`,
-    background: "rgba(255,255,255,0.98)",
-    maxHeight: "38dvh",
-    overflowY: "auto",
-    WebkitOverflowScrolling: "touch",
-  },
-
-  loadingItem: {
-    padding: "14px 16px",
-    fontSize: 14,
-    color: C.sub,
-  },
-
-  suggestionItem: {
-    width: "100%",
-    border: "none",
-    background: "transparent",
-    padding: "12px 14px",
-    display: "flex",
-    alignItems: "flex-start",
-    gap: 10,
-    textAlign: "left",
-    cursor: "pointer",
-  },
-
-  suggestionIcon: {
-    marginTop: 2,
-    color: C.accent,
-    flexShrink: 0,
-  },
-
-  suggestionTexts: {
-    minWidth: 0,
-    flex: 1,
-  },
-
-  suggestionMain: {
-    color: C.text,
-    fontSize: 14,
-    fontWeight: 800,
-    lineHeight: 1.2,
-  },
-
-  suggestionSub: {
-    marginTop: 3,
-    color: C.sub2,
-    fontSize: 12,
-    lineHeight: 1.35,
-  },
-
-  topInfoStack: {
-    width: "min(92vw, 560px)",
-    display: "flex",
-    flexDirection: "column",
-    gap: 10,
-    pointerEvents: "auto",
-  },
-
-  statusCard: {
-    background: "rgba(255,255,255,0.94)",
-    backdropFilter: "blur(18px)",
-    WebkitBackdropFilter: "blur(18px)",
-    border: `1px solid ${C.line}`,
-    borderRadius: 22,
-    boxShadow: `0 10px 30px ${C.shadow}`,
-    padding: 12,
-  },
-
-  statusLine: {
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: 10,
-    marginBottom: 10,
-  },
-
-  statusLabel: {
-    fontSize: 12,
-    fontWeight: 700,
-    color: C.sub,
-    textTransform: "uppercase",
-    letterSpacing: "0.04em",
-  },
-
-  statusValue: {
-    fontSize: 14,
-    fontWeight: 800,
-    color: C.text,
-    textAlign: "right",
-  },
-
-  statusActions: {
-    display: "flex",
-    gap: 8,
-    flexWrap: "wrap",
-  },
-
-  primaryButton: {
-    height: 40,
-    border: "none",
-    borderRadius: 999,
-    background: C.accent,
-    color: "#fff",
-    padding: "0 16px",
-    fontSize: 14,
-    fontWeight: 800,
-    cursor: "pointer",
-  },
-
-  secondaryButton: {
-    height: 40,
-    borderRadius: 999,
-    border: `1px solid ${C.line}`,
-    background: C.surface,
-    color: C.text,
-    padding: "0 16px",
-    fontSize: 14,
-    fontWeight: 700,
-    cursor: "pointer",
-  },
-
-  routeScroller: {
-    display: "flex",
-    gap: 10,
-    overflowX: "auto",
-    paddingBottom: 2,
-    WebkitOverflowScrolling: "touch",
-  },
-
-  routeCard: {
-    minWidth: 220,
-    maxWidth: 220,
-    borderRadius: 22,
-    border: "1.5px solid",
-    background: "rgba(255,255,255,0.96)",
-    padding: 12,
-    textAlign: "left",
-    cursor: "pointer",
-  },
-
-  routeTopRow: {
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: 8,
-  },
-
-  routeTitle: {
-    fontSize: 14,
-    fontWeight: 800,
-    color: C.text,
-  },
-
-  routeBadge: {
-    height: 24,
-    minWidth: 46,
-    padding: "0 10px",
-    borderRadius: 999,
-    display: "inline-flex",
-    alignItems: "center",
-    justifyContent: "center",
-    fontSize: 11,
-    fontWeight: 800,
-  },
-
-  routeMainMetrics: {
-    marginTop: 10,
-    display: "flex",
-    flexDirection: "column",
-    gap: 2,
-  },
-
-  metricBig: {
-    fontSize: 22,
-    fontWeight: 900,
-    color: C.text,
-    lineHeight: 1,
-  },
-
-  metricSmall: {
-    fontSize: 13,
-    fontWeight: 700,
-    color: C.sub,
-  },
-
-  routeMiniGrid: {
-    marginTop: 12,
-    display: "grid",
-    gridTemplateColumns: "repeat(2, minmax(0,1fr))",
-    gap: 8,
-  },
-
-  routeMiniItem: {
-    display: "flex",
-    flexDirection: "column",
-    gap: 3,
-    padding: 8,
-    borderRadius: 14,
-    background: C.bg,
-  },
-
-  routeMiniLabel: {
-    fontSize: 11,
-    fontWeight: 700,
-    color: C.sub2,
-  },
-
-  routeMiniValue: {
-    fontSize: 13,
-    fontWeight: 800,
-    color: C.text,
-  },
-
-  activeRouteCard: {
-    background: "rgba(255,255,255,0.96)",
-    border: `1px solid ${C.line}`,
-    borderRadius: 22,
-    boxShadow: `0 10px 30px ${C.shadow}`,
-    padding: 12,
-  },
-
-  activeRouteTitle: {
-    fontSize: 14,
-    fontWeight: 800,
-    color: C.text,
-    marginBottom: 10,
-  },
-
-  activeGrid: {
-    display: "grid",
-    gridTemplateColumns: "repeat(2, minmax(0,1fr))",
-    gap: 8,
-  },
-
-  infoCell: {
-    background: C.bg,
-    borderRadius: 14,
-    padding: 10,
-  },
-
-  infoCellTitle: {
-    fontSize: 11,
-    fontWeight: 700,
-    color: C.sub2,
-    marginBottom: 4,
-  },
-
-  infoCellValue: {
-    fontSize: 14,
-    fontWeight: 800,
-    color: C.text,
-  },
-
-  errorToast: {
-    position: "absolute",
-    left: 12,
-    right: 12,
-    top: "calc(max(12px, env(safe-area-inset-top)) + 430px)",
-    zIndex: 1200,
-    background: C.danger,
-    color: "#fff",
-    padding: "12px 14px",
-    borderRadius: 14,
-    fontSize: 13,
-    fontWeight: 700,
-  },
-};
