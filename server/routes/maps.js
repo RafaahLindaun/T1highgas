@@ -1,24 +1,19 @@
 import express from "express";
 
 const router = express.Router();
-
 const OSRM_BASE = "https://router.project-osrm.org";
 
 function formatDuration(seconds) {
   const mins = Math.round(seconds / 60);
   if (mins < 60) return `${mins} min`;
-
   const h = Math.floor(mins / 60);
   const m = mins % 60;
-
-  if (m === 0) return `${h}h`;
-  return `${h}h ${m}min`;
+  return m === 0 ? `${h}h` : `${h}h ${m}min`;
 }
 
 function formatDistance(meters) {
   const km = meters / 1000;
-  if (km < 10) return `${km.toFixed(1)} km`;
-  return `${Math.round(km)} km`;
+  return km < 10 ? `${km.toFixed(1)} km` : `${Math.round(km)} km`;
 }
 
 function formatLiters(value) {
@@ -42,7 +37,6 @@ function estimateFuelAndEco({ distanceMeters, durationSeconds, stepsCount, vehic
   ) {
     const city = Number(vehicle.city_km_l);
     const hwy = Number(vehicle.hwy_km_l);
-
     const urbanFactor = avgSpeedKmh < 30 ? 0.82 : avgSpeedKmh < 55 ? 0.5 : 0.2;
     kmPerLiter = city * urbanFactor + hwy * (1 - urbanFactor);
   } else {
