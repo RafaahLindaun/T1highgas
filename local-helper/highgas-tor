@@ -139,7 +139,7 @@ choose_utun() {
 save_dns_state() {
   local svc="$1" raw
   raw="$(/usr/sbin/networksetup -getdnsservers "$svc" 2>/dev/null || true)"
-  if [[ -z "$raw" || "$raw" == There\ aren't\ any* ]]; then
+  if [[ -z "$raw" || "$raw" == *"There aren't any"* ]]; then
     print -r -- "empty|"
   else
     print -r -- "list|${raw//$'\n'/,}"
