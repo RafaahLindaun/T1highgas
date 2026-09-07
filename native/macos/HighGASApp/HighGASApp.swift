@@ -1,3 +1,4 @@
+import NetworkExtension
 import SwiftUI
 
 @main
