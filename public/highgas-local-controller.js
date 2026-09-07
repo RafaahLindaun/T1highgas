@@ -136,13 +136,13 @@
     if (checkTitle) checkTitle.textContent = connected ? "Você está conectado" : "VPN pronta para ligar";
     if (checkCopy) {
       checkCopy.textContent = lastError || (connected
-        ? "O helper controla o túnel diretamente no macOS e continua ativo em segundo plano."
-        : "Toque em Ligar VPN. Não é necessário abrir o WireGuard.");
+        ? "O HighGAS controla o túnel WireGuard diretamente e continua ativo em segundo plano."
+        : "Toque em Ligar VPN. Não é necessário abrir o aplicativo WireGuard.");
     }
     if (profileTitle) profileTitle.textContent = "Instalar perfil HighGAS";
-    if (profileCopy) profileCopy.textContent = "Escolha o .conf uma vez; a instalação acontece localmente no macOS.";
+    if (profileCopy) profileCopy.textContent = "Escolha o .conf uma vez; o HighGAS guarda o perfil somente neste Mac.";
     if (note) {
-      note.textContent = "HighGAS Local controla a VPN diretamente no macOS. O WireGuard pode permanecer fechado.";
+      note.textContent = "HighGAS Local usa WireGuard por baixo e controla a VPN diretamente no macOS, sem Xcode.";
     }
   };
 
@@ -181,9 +181,9 @@
       window.setTimeout(() => void refresh(), 2200);
     } catch (error) {
       if (error && error.status === 409) {
-        lastError = "O perfil deste país ainda não está instalado. Clique em Adicionar perfil e confirme a instalação uma única vez.";
+        lastError = "O perfil deste país ainda não está instalado. Adicione o .conf uma única vez.";
       } else {
-        lastError = "Não consegui acionar o helper agora. Ele continuará tentando em segundo plano.";
+        lastError = "Não consegui acionar o HighGAS Local agora.";
       }
     }
     paint();
@@ -223,7 +223,7 @@
     }
 
     const server = (localStorage.getItem(SERVER_KEY) || "br-sao-01").toLowerCase();
-    lastError = "Preparando a instalação segura no macOS…";
+    lastError = "Salvando o perfil somente neste Mac…";
     paint();
     try {
       await request("/v1/install-profile", {
@@ -231,13 +231,12 @@
         timeoutMs: 8000,
         body: JSON.stringify({ server, config }),
       });
-      lastError = "O macOS abriu o perfil HighGAS. Confirme Instalar uma única vez; depois o botão Ligar/Desligar fica automático.";
-      window.setTimeout(() => void refresh(), 2500);
-      window.setTimeout(() => void refresh(), 7000);
+      lastError = "Perfil HighGAS instalado localmente. Agora toque em Ligar VPN.";
+      window.setTimeout(() => void refresh(), 800);
     } catch (error) {
       lastError = error && error.message === "invalid_wireguard_config"
         ? "O perfil WireGuard está incompleto."
-        : "Não consegui abrir a instalação do perfil no macOS.";
+        : "Não consegui salvar o perfil no HighGAS Local.";
     }
     paint();
   };
