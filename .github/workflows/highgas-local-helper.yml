@@ -177,10 +177,10 @@ jobs:
 
   macos-safety:
     runs-on: macos-13
-    timeout-minutes: 12
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - name: macOS native checks
+      - name: macOS native PF, utun and route checks
         shell: bash
         run: |
           set -euo pipefail
@@ -192,6 +192,8 @@ jobs:
           command -v /usr/sbin/networksetup
           command -v /usr/bin/security
           command -v /bin/launchctl
+          id _www
+
           cat >/tmp/highgas-pf-test.conf <<'EOF'
           pass out quick on lo0 all
           pass out quick on en0 route-to (en0 192.0.2.1) inet proto tcp user _www keep state
@@ -199,5 +201,30 @@ jobs:
           block drop out quick inet6 all
           EOF
           sudo /sbin/pfctl -nf /tmp/highgas-pf-test.conf
-          id _www
-          echo "macOS PF syntax and required system tools: OK"
+
+          curl --fail --location --retry 3 \
+            "https://github.com/xjasonlyu/tun2socks/releases/download/v${TUN2SOCKS_VERSION}/tun2socks-darwin-amd64.zip" \
+            -o /tmp/tun2socks.zip
+          echo "${TUN2SOCKS_AMD64_SHA256}  /tmp/tun2socks.zip" | shasum -a 256 -c -
+          mkdir -p /tmp/t2s && unzip -q /tmp/tun2socks.zip -d /tmp/t2s
+          TUN="$(find /tmp/t2s -type f -name tun2socks -print -quit)"
+          test -n "$TUN"
+          chmod +x "$TUN"
+          file "$TUN" | grep -Eqi 'x86_64|x86-64'
+
+          sudo "$TUN" -device utun230 -proxy socks5://127.0.0.1:9 -loglevel error >/tmp/t2s.log 2>&1 &
+          PID=$!
+          trap 'sudo kill "$PID" >/dev/null 2>&1 || true; sudo /sbin/route -q -n delete -inet 203.0.113.0/24 -interface utun230 >/dev/null 2>&1 || true' EXIT
+          for i in {1..30}; do
+            /sbin/ifconfig utun230 >/dev/null 2>&1 && break
+            sleep 0.2
+          done
+          /sbin/ifconfig utun230
+          sudo /sbin/ifconfig utun230 inet 198.18.0.1 198.18.0.1 up
+          sudo /sbin/route -q -n add -inet 203.0.113.0/24 -interface utun230
+          /sbin/route -n get 203.0.113.1 | grep -q 'interface: utun230'
+          sudo /sbin/route -q -n delete -inet 203.0.113.0/24 -interface utun230
+          sudo kill "$PID" >/dev/null 2>&1 || true
+          wait "$PID" 2>/dev/null || true
+          trap - EXIT
+          echo "macOS native PF + utun + route runtime checks: OK"
