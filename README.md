@@ -2,6 +2,8 @@
 
 HighGAS é um painel pessoal para macOS com controle local, sem login, sem Xcode e sem assinatura obrigatória.
 
+**Versão atual:** HighGAS Free — Alemanha/EUA via Tor + WireGuard próprio disponível para endpoints futuros.
+
 ## Modo gratuito atual
 
 - Alemanha e Estados Unidos usam a rede Tor por meio do Tor Expert Bundle oficial;
