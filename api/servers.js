@@ -28,6 +28,15 @@ const queryCatalog = async (databaseUrl) => {
   `;
 };
 
+const safeTarget = (value) => {
+  try {
+    const parsed = new URL(value);
+    return `${parsed.hostname}${parsed.pathname}`;
+  } catch {
+    return "unparseable";
+  }
+};
+
 export default async function handler(req, res) {
   if (req.method !== "GET") {
     res.setHeader("Allow", "GET");
@@ -55,7 +64,7 @@ export default async function handler(req, res) {
       }
     } catch (error) {
       console.error(
-        `HighGAS Neon query failed (${source})`,
+        `HighGAS Neon query failed (${source}) target=${safeTarget(databaseUrl)}`,
         error instanceof Error ? error.message : String(error)
       );
     }
