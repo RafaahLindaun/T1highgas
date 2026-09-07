@@ -1,458 +1,257 @@
 (() => {
-  const LOCAL_HOST = window.location.hostname === "127.0.0.1" || window.location.hostname === "localhost";
-  const BASE = LOCAL_HOST ? window.location.origin : "https://127.0.0.1:37654";
-  const TOKEN_KEY = "highgas:helper-token";
-  const SERVER_KEY = "highgas:selected-server";
-  const PHASES = ["idle", "preparing", "waiting", "connected", "attention"];
-  const DEFAULT_TOR_SERVERS = ["de-fra-01", "us-mia-01"];
+  const LOCAL_HOST = location.hostname === "127.0.0.1" || location.hostname === "localhost";
+  if (!LOCAL_HOST) return;
 
-  let token = "";
+  const BASE = location.origin;
+  const SERVER_KEY = "highgas:selected-server";
+  const TOR_SERVERS = ["de-fra-01", "us-mia-01"];
   let helperAvailable = false;
+  let torReady = false;
   let connected = false;
   let activeServer = "";
   let activeMode = "";
-  let activeCountry = "";
   let connectedAt = 0;
   let lastError = "";
-  let torReady = false;
-  let torServers = [...DEFAULT_TOR_SERVERS];
+  let busy = false;
 
-  try {
-    const match = window.location.hash.match(/^#highgas-helper=([a-f0-9]{32,})$/i);
-    if (match) {
-      localStorage.setItem(TOKEN_KEY, match[1]);
-      history.replaceState(null, "", `${location.pathname}${location.search}`);
-    }
-    token = localStorage.getItem(TOKEN_KEY) || "";
-  } catch {
-    token = "";
-  }
-
-  const selectedServerCode = () => {
+  const selectedServer = () => {
     try {
-      return (localStorage.getItem(SERVER_KEY) || "de-fra-01").toLowerCase();
+      const v = (localStorage.getItem(SERVER_KEY) || "de-fra-01").toLowerCase();
+      return TOR_SERVERS.includes(v) ? v : "de-fra-01";
     } catch {
       return "de-fra-01";
     }
   };
 
-  const isTorSelection = () => torServers.includes(selectedServerCode());
-  const countryLabel = (server) => {
-    if (server === "de-fra-01") return "Alemanha";
-    if (server === "us-mia-01") return "Estados Unidos";
-    return server || "HighGAS";
-  };
+  const label = (code) => code === "us-mia-01" ? "Estados Unidos" : "Alemanha";
+  const isTor = () => TOR_SERVERS.includes(selectedServer());
+  const setText = (el, value) => { if (el && el.textContent !== value) el.textContent = value; };
 
   const request = async (path, options = {}) => {
-    if (!token) throw new Error("not_paired");
-    const { timeoutMs = 3000, ...fetchOptions } = options;
-    const controller = new AbortController();
-    const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
-
+    const { timeoutMs = 5000, ...rest } = options;
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     try {
-      const response = await fetch(`${BASE}${path}`, {
-        ...fetchOptions,
+      const res = await fetch(`${BASE}${path}`, {
+        ...rest,
+        credentials: "same-origin",
         cache: "no-store",
-        signal: controller.signal,
+        signal: ctrl.signal,
         headers: {
           Accept: "application/json",
           "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-          ...(fetchOptions.headers || {}),
+          ...(rest.headers || {}),
         },
       });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        const error = new Error(payload.error || `helper_${response.status}`);
-        error.status = response.status;
-        error.payload = payload;
-        throw error;
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const err = new Error(data.error || `helper_${res.status}`);
+        err.status = res.status;
+        err.payload = data;
+        throw err;
       }
-      return payload;
+      return data;
     } finally {
-      window.clearTimeout(timeout);
+      clearTimeout(timer);
     }
   };
 
-  const setText = (element, value) => {
-    if (element && element.textContent !== value) element.textContent = value;
-  };
-
-  const setPhaseClass = (element, prefix, phase) => {
-    if (!element) return;
-    PHASES.forEach((item) => element.classList.remove(`${prefix}${item}`));
-    element.classList.add(`${prefix}${phase}`);
-  };
-
-  const formatDuration = () => {
-    if (!connected || !connectedAt) return "00:00:00";
-    const total = Math.max(0, Math.floor((Date.now() - connectedAt) / 1000));
-    const hours = Math.floor(total / 3600);
-    const minutes = Math.floor((total % 3600) / 60);
-    const seconds = total % 60;
-    return [hours, minutes, seconds].map((value) => String(value).padStart(2, "0")).join(":");
-  };
-
-  const findLabeledContainer = (label) => {
-    const wanted = label.toUpperCase();
-    const labels = document.querySelectorAll("small, span, p, div");
-    for (const element of labels) {
-      if (element.childElementCount === 0 && (element.textContent || "").trim().toUpperCase() === wanted) {
-        return element.parentElement;
-      }
+  const findBox = (labelText) => {
+    for (const el of document.querySelectorAll("small")) {
+      if ((el.textContent || "").trim().toUpperCase() === labelText) return el.parentElement;
     }
     return null;
   };
 
-  const updateLabeledStat = (label, title, copy) => {
-    const box = findLabeledContainer(label);
+  const setStat = (name, title, copy) => {
+    const box = findBox(name);
     if (!box) return;
     setText(box.querySelector("strong"), title);
-    setText(box.querySelector("small"), copy);
-  };
-
-  const updateServerCards = () => {
-    document.querySelectorAll(".server-card").forEach((card) => {
-      const name = card.querySelector(".server-copy strong");
-      const copy = card.querySelector(".server-copy small");
-      const value = (name && name.textContent || "").trim();
-      if (value === "Alemanha" || value === "Estados Unidos") {
-        setText(copy, "Rede Tor · gratuito");
-      }
-    });
+    const spans = box.querySelectorAll("span, small");
+    const copyEl = [...spans].find((x) => x !== box.querySelector("small"));
+    if (copyEl) setText(copyEl, copy);
   };
 
   const ensureBadge = () => {
     let badge = document.getElementById("highgas-local-badge");
-    if (!token) {
-      if (badge) badge.style.display = "none";
-      return;
-    }
-
     if (!badge) {
       badge = document.createElement("div");
       badge.id = "highgas-local-badge";
-      badge.style.cssText = [
-        "position:fixed",
-        "right:14px",
-        "top:max(14px, env(safe-area-inset-top))",
-        "z-index:9999",
-        "padding:7px 10px",
-        "border-radius:999px",
-        "font:600 11px/1.2 -apple-system,BlinkMacSystemFont,sans-serif",
-        "backdrop-filter:blur(14px)",
-        "border:1px solid rgba(255,255,255,.12)",
-        "box-shadow:0 8px 24px rgba(0,0,0,.25)",
-        "pointer-events:none",
-      ].join(";");
+      badge.style.cssText = "position:fixed;right:14px;top:14px;z-index:9999;padding:7px 10px;border-radius:999px;font:600 11px -apple-system,BlinkMacSystemFont,sans-serif;border:1px solid rgba(255,255,255,.12);box-shadow:0 8px 24px rgba(0,0,0,.25);pointer-events:none";
       document.body.appendChild(badge);
     }
-
-    badge.style.display = "block";
-    badge.style.background = helperAvailable ? "rgba(15,52,31,.88)" : "rgba(48,42,20,.9)";
+    badge.style.background = helperAvailable ? "rgba(15,52,31,.92)" : "rgba(48,42,20,.92)";
     badge.style.color = helperAvailable ? "#8dffb6" : "#ffd978";
     setText(badge, helperAvailable ? (torReady ? "HighGAS Local + Tor ✓" : "HighGAS Local ✓") : "HighGAS Local offline");
   };
 
-  const paint = () => {
-    if (!document.body) return;
-    ensureBadge();
-    updateServerCards();
-    if (!helperAvailable) return;
-
-    const selected = selectedServerCode();
-    const torSelected = isTorSelection() && torReady;
-    const sameActive = connected && activeServer === selected;
-    const phase = connected ? "connected" : "idle";
-    const powerCard = document.querySelector(".power-card");
-    const powerButton = document.querySelector(".power-button");
-    const bannerStatus = document.querySelector(".connection-banner > div:not(.banner-time) strong");
-    const timer = document.querySelector(".banner-time strong");
-    const check = document.querySelector(".connection-check .check-icon");
-    const checkTitle = document.querySelector(".connection-check strong");
-    const checkCopy = document.querySelector(".connection-check small");
-    const note = document.querySelector(".system-note");
-    const profileTitle = document.querySelector(".profile-cta strong");
-    const profileCopy = document.querySelector(".profile-cta small");
-
-    setPhaseClass(powerCard, "power-card--", phase);
-    setPhaseClass(powerButton, "power-button--", phase);
-
-    setText(bannerStatus, connected ? "Conectado" : "Não conectado");
-    setText(timer, formatDuration());
-
-    if (powerButton) {
-      powerButton.disabled = false;
-      const action = sameActive ? "DESLIGAR VPN" : connected ? "TROCAR SAÍDA" : "LIGAR VPN";
-      powerButton.setAttribute("aria-label", action);
-      setText(powerButton.querySelector("strong"), action);
-      setText(
-        powerButton.querySelector("small"),
-        connected
-          ? `${countryLabel(activeServer)} · ${activeMode === "tor" ? "Tor ativo" : "controle local ativo"}`
-          : torSelected
-            ? "1 toque · Tor automático"
-            : "1 toque · controle local automático"
-      );
-    }
-
-    if (check) {
-      setText(check, connected ? "✓" : "·");
-      check.classList.toggle("check-icon--ok", connected);
-    }
-
-    if (torSelected) {
-      setText(checkTitle, connected ? "Tor ativo" : "Tor pronto para ligar");
-      setText(
-        checkCopy,
-        lastError || (connected
-          ? `Saída ${countryLabel(activeServer)} ativa. Alguns sites podem identificar ou bloquear IPs da rede Tor.`
-          : "A primeira conexão pode levar até cerca de 1 minuto. Não precisa de perfil WireGuard.")
-      );
-      setText(profileTitle, "Tor integrado");
-      setText(profileCopy, "Sem .conf, sem cartão e sem servidor pago.");
-      setText(note, "Modo Tor gratuito: navegação e apps que respeitam o proxy do macOS passam pelo Tor. UDP e apps que ignoram proxy podem usar a conexão normal.");
-      updateLabeledStat("PERFIL", "Tor integrado", "sem arquivo .conf");
-      updateLabeledStat("MONITOR", connected ? "Tor ativo" : "Em espera", connected ? countryLabel(activeServer) : "ativa ao ligar");
-    } else {
-      setText(checkTitle, connected ? "Você está conectado" : "VPN pronta para ligar");
-      setText(
-        checkCopy,
-        lastError || (connected
-          ? "O HighGAS controla o túnel WireGuard diretamente e continua ativo em segundo plano."
-          : "Toque em Ligar VPN. Não é necessário abrir o aplicativo WireGuard.")
-      );
-      setText(profileTitle, "Instalar perfil HighGAS");
-      setText(profileCopy, "Escolha o .conf uma vez; o HighGAS guarda o perfil somente neste Mac.");
-      setText(note, LOCAL_HOST
-        ? "HighGAS Local ativo: interface e WireGuard estão conectados diretamente neste Mac."
-        : "HighGAS Local usa WireGuard por baixo e controla a VPN diretamente no macOS, sem Xcode.");
-    }
+  const formatDuration = () => {
+    if (!connected || !connectedAt) return "00:00:00";
+    const t = Math.max(0, Math.floor((Date.now() - connectedAt) / 1000));
+    return [Math.floor(t / 3600), Math.floor((t % 3600) / 60), t % 60].map(v => String(v).padStart(2, "0")).join(":");
   };
 
-  const refreshNetworkDisplay = async () => {
+  const paint = () => {
+    ensureBadge();
+    document.querySelectorAll(".server-card").forEach((card) => {
+      const name = (card.querySelector(".server-copy strong")?.textContent || "").trim();
+      if (name === "Alemanha" || name === "Estados Unidos") setText(card.querySelector(".server-copy small"), "Rede Tor · gratuito");
+    });
+    if (!helperAvailable) return;
+
+    const selected = selectedServer();
+    const power = document.querySelector(".power-button");
+    const banner = document.querySelector(".connection-banner > div:not(.banner-time) strong");
+    const timer = document.querySelector(".banner-time strong");
+    const checkTitle = document.querySelector(".connection-check strong");
+    const checkCopy = document.querySelector(".connection-check small");
+    const profile = document.querySelector(".profile-cta");
+    const note = document.querySelector(".system-note");
+
+    setText(banner, connected ? "Conectado" : busy ? "Conectando" : "Não conectado");
+    setText(timer, formatDuration());
+
+    if (power) {
+      power.disabled = busy;
+      const action = busy ? "CONECTANDO…" : connected && activeServer === selected ? "DESLIGAR VPN" : connected ? "TROCAR SAÍDA" : "LIGAR VPN";
+      setText(power.querySelector("strong"), action);
+      setText(power.querySelector("small"), connected ? `${label(activeServer)} · Tor ativo` : "1 toque · Tor automático");
+    }
+
+    setText(checkTitle, connected ? "Tor ativo" : busy ? "Conectando ao Tor" : "Tor pronto para ligar");
+    setText(checkCopy, lastError || (connected ? `Saída ${label(activeServer)} ativa.` : "Não precisa de arquivo. Escolha o país e toque em Ligar VPN."));
+
+    if (profile) {
+      setText(profile.querySelector("strong"), "Tor integrado");
+      setText(profile.querySelector("small"), "Sem .conf, sem cartão e sem arquivo para abrir.");
+    }
+    setText(note, "HighGAS Local: o botão liga e desliga o Tor diretamente. Abra sempre por https://127.0.0.1:37654/");
+    setStat("PERFIL", "Tor integrado", "sem arquivo .conf");
+    setStat("MONITOR", connected ? "Tor ativo" : busy ? "Conectando" : "Em espera", connected ? label(activeServer) : "ativa ao ligar");
+  };
+
+  const refreshNetwork = async () => {
     if (!helperAvailable) return;
     try {
-      const response = await fetch(`${BASE}/api/network-info?ts=${Date.now()}`, {
-        cache: "no-store",
-        headers: { Accept: "application/json" },
-      });
-      if (!response.ok) return;
-      const data = await response.json();
-      updateLabeledStat("IP ATUAL", data.ip || "—", [data.country, data.city].filter(Boolean).join(" · ") || "—");
-    } catch {
-      // O monitor principal continua funcionando mesmo se esta leitura visual falhar.
-    }
+      const res = await fetch(`${BASE}/api/network-info?ts=${Date.now()}`, { cache: "no-store", credentials: "same-origin" });
+      if (!res.ok) return;
+      const data = await res.json();
+      setStat("IP ATUAL", data.ip || "—", [data.country, data.city].filter(Boolean).join(" · ") || "—");
+    } catch {}
   };
 
   const refresh = async () => {
-    if (!token) {
-      helperAvailable = false;
-      paint();
-      return;
-    }
-
     try {
-      const result = await request("/v1/status", { method: "GET" });
+      const s = await request("/v1/status", { method: "GET" });
       helperAvailable = true;
-      connected = Boolean(result.connected);
-      activeServer = result.activeServer || "";
-      activeMode = result.mode || "";
-      activeCountry = result.country || "";
-      torReady = Boolean(result.torReady);
-      if (Array.isArray(result.torServers) && result.torServers.length) {
-        torServers = result.torServers.map((item) => String(item).toLowerCase());
-      }
+      torReady = Boolean(s.torReady);
+      connected = Boolean(s.connected);
+      activeServer = s.activeServer || "";
+      activeMode = s.mode || "";
       if (connected) {
-        const parsed = result.connectedAt ? new Date(result.connectedAt).getTime() : NaN;
+        const parsed = s.connectedAt ? new Date(s.connectedAt).getTime() : NaN;
         if (Number.isFinite(parsed)) connectedAt = parsed;
         else if (!connectedAt) connectedAt = Date.now();
       } else {
         connectedAt = 0;
       }
-      if (lastError === "Conexão solicitada. Confirmando o túnel…" || lastError === "Tor conectado. Confirmando o IP de saída…") {
-        lastError = "";
-      }
     } catch {
       helperAvailable = false;
     }
-
     paint();
-    if (helperAvailable) void refreshNetworkDisplay();
+    if (helperAvailable) void refreshNetwork();
   };
 
   const connect = async () => {
-    const server = selectedServerCode();
-    const torSelected = isTorSelection();
-    lastError = torSelected ? "Conectando ao Tor e procurando uma saída no país escolhido…" : "Conectando…";
+    if (busy) return;
+    busy = true;
+    lastError = `Conectando ao Tor em ${label(selectedServer())}…`;
     paint();
-
     try {
-      await request("/v1/connect", {
-        method: "POST",
-        timeoutMs: torSelected ? 170000 : 15000,
-        body: JSON.stringify({ server }),
-      });
-      lastError = torSelected ? "Tor conectado. Confirmando o IP de saída…" : "Conexão solicitada. Confirmando o túnel…";
+      await request("/v1/connect", { method: "POST", timeoutMs: 170000, body: JSON.stringify({ server: selectedServer() }) });
+      lastError = "";
       await refresh();
-      window.setTimeout(() => void refresh(), 1200);
-      window.setTimeout(() => void refresh(), 3500);
-    } catch (error) {
-      const code = error && error.message;
-      const detail = error && error.payload && error.payload.detail;
-      if (code === "tor_not_installed") {
-        lastError = "Esta instalação ainda não possui o motor Tor. Reinstale o pacote HighGAS com Tor.";
-      } else if (code === "tor_timeout") {
-        lastError = "O Tor demorou demais para conectar. Tente Ligar VPN novamente.";
-      } else if (code === "tor_connect_failed") {
-        lastError = detail || "Não consegui criar a saída Tor escolhida agora.";
-      } else if (error && error.status === 409) {
-        lastError = "O perfil deste país ainda não está instalado. Adicione o .conf uma única vez.";
-      } else {
-        lastError = "Não consegui acionar o HighGAS Local agora.";
-      }
+    } catch (e) {
+      const detail = e?.payload?.detail;
+      lastError = detail || "Não consegui ligar o Tor agora. Tente novamente.";
+    } finally {
+      busy = false;
       paint();
+      void refreshNetwork();
     }
   };
 
   const disconnect = async () => {
+    if (busy) return;
+    busy = true;
     lastError = "Desligando…";
     paint();
-
     try {
-      await request("/v1/disconnect", {
-        method: "POST",
-        timeoutMs: 15000,
-        body: JSON.stringify(activeServer ? { server: activeServer } : {}),
-      });
+      await request("/v1/disconnect", { method: "POST", timeoutMs: 15000, body: "{}" });
       connected = false;
       activeServer = "";
-      activeMode = "";
-      activeCountry = "";
       connectedAt = 0;
-      lastError = "HighGAS desligado e conexão normal restaurada.";
-      await refreshNetworkDisplay();
-      window.setTimeout(() => void refresh(), 500);
+      lastError = "Conexão normal restaurada.";
     } catch {
-      lastError = "Não consegui desligar pelo HighGAS Local agora.";
-    }
-
-    paint();
-  };
-
-  const installProfile = async (file) => {
-    if (!file || !helperAvailable) return;
-    if (isTorSelection()) {
-      lastError = "O modo Tor já vem integrado e não precisa de arquivo .conf.";
+      lastError = "Não consegui desligar agora.";
+    } finally {
+      busy = false;
       paint();
-      return;
+      setTimeout(() => void refresh(), 600);
     }
-    if (file.size > 64 * 1024) {
-      lastError = "Esse arquivo é grande demais para um perfil WireGuard.";
-      paint();
-      return;
-    }
-
-    const config = await file.text();
-    if (!/\[Interface\]/i.test(config) || !/\[Peer\]/i.test(config) || !/PrivateKey\s*=/i.test(config)) {
-      lastError = "Esse arquivo não parece um perfil WireGuard válido.";
-      paint();
-      return;
-    }
-
-    const server = selectedServerCode();
-    lastError = "Salvando o perfil somente neste Mac…";
-    paint();
-
-    try {
-      await request("/v1/install-profile", {
-        method: "POST",
-        timeoutMs: 8000,
-        body: JSON.stringify({ server, config }),
-      });
-      lastError = "Perfil HighGAS instalado localmente. Agora toque em Ligar VPN.";
-      window.setTimeout(() => void refresh(), 800);
-    } catch (error) {
-      lastError = error && error.message === "invalid_wireguard_config"
-        ? "O perfil WireGuard está incompleto."
-        : "Não consegui salvar o perfil no HighGAS Local.";
-    }
-
-    paint();
   };
 
   document.addEventListener("click", (event) => {
-    const element = event.target instanceof Element ? event.target : null;
-    if (!element || !helperAvailable || !token) return;
+    const el = event.target instanceof Element ? event.target : null;
+    if (!el) return;
 
-    const profile = element.closest(".profile-cta");
-    if (profile && isTorSelection()) {
-      event.preventDefault();
-      event.stopPropagation();
-      event.stopImmediatePropagation();
-      lastError = "O Tor já está integrado. Não precisa adicionar nenhum perfil.";
+    const card = el.closest(".server-card");
+    if (card) {
+      const name = (card.querySelector(".server-copy strong")?.textContent || "").trim();
+      const code = name === "Estados Unidos" ? "us-mia-01" : name === "Alemanha" ? "de-fra-01" : "";
+      if (code) {
+        try { localStorage.setItem(SERVER_KEY, code); } catch {}
+        setTimeout(paint, 80);
+      }
+    }
+
+    if (el.closest(".profile-cta") && isTor()) {
+      event.preventDefault(); event.stopPropagation(); event.stopImmediatePropagation();
+      lastError = "O Tor já está integrado. Nenhum arquivo é necessário.";
       paint();
       return;
     }
 
-    const power = element.closest(".power-button");
+    const power = el.closest(".power-button");
     if (power) {
-      event.preventDefault();
-      event.stopPropagation();
-      event.stopImmediatePropagation();
-      const selected = selectedServerCode();
-      void (connected && activeServer === selected ? disconnect() : connect());
-      return;
-    }
-
-    if (element.closest(".server-card")) {
-      window.setTimeout(paint, 80);
-      window.setTimeout(() => void refreshNetworkDisplay(), 120);
+      event.preventDefault(); event.stopPropagation(); event.stopImmediatePropagation();
+      if (!helperAvailable || !torReady) {
+        lastError = "HighGAS Local ainda não está pronto.";
+        paint();
+        return;
+      }
+      void (connected && activeServer === selectedServer() ? disconnect() : connect());
     }
   }, true);
 
   document.addEventListener("change", (event) => {
     const input = event.target;
-    if (!(input instanceof HTMLInputElement) || input.type !== "file" || !helperAvailable || !token) return;
-    const file = input.files && input.files[0];
-    if (!file || !file.name.toLowerCase().endsWith(".conf")) return;
-    event.preventDefault();
-    event.stopPropagation();
-    event.stopImmediatePropagation();
-    void installProfile(file);
+    if (input instanceof HTMLInputElement && input.type === "file" && isTor()) {
+      event.preventDefault(); event.stopPropagation(); event.stopImmediatePropagation();
+      input.value = "";
+      lastError = "O Tor já está integrado. Nenhum arquivo é necessário.";
+      paint();
+    }
   }, true);
 
-  window.HighGASLocal = {
-    refresh,
-    connect,
-    disconnect,
-    installProfile,
-    forgetPairing() {
-      localStorage.removeItem(TOKEN_KEY);
-      token = "";
-      helperAvailable = false;
-      paint();
-    },
-  };
-
-  const paintWhenReady = () => {
+  const observer = new MutationObserver(() => paint());
+  const start = () => {
+    try { if (!localStorage.getItem(SERVER_KEY)) localStorage.setItem(SERVER_KEY, "de-fra-01"); } catch {}
+    observer.observe(document.body, { childList: true, subtree: true });
     paint();
-    window.setTimeout(paint, 150);
-    window.setTimeout(paint, 600);
-    window.setTimeout(paint, 1500);
+    void refresh();
+    setInterval(() => void refresh(), 4000);
+    setInterval(() => { if (connected) paint(); }, 1000);
   };
-
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", paintWhenReady, { once: true });
-  } else {
-    paintWhenReady();
-  }
-
-  void refresh();
-  window.setInterval(() => {
-    if (token) void refresh();
-  }, 4000);
-  window.setInterval(() => {
-    if (connected) paint();
-  }, 1000);
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", start, { once: true }); else start();
 })();
