@@ -10,36 +10,61 @@ on:
   workflow_dispatch:
 
 env:
+  TOR_EXPERT_VERSION: "15.0.21"
   TUN2SOCKS_VERSION: "2.7.0"
   TUN2SOCKS_AMD64_SHA256: "6e654da8bab9ca1645862f0e251a69980e0966680713011feea7b1e5901b2a95"
 
 jobs:
   intel-runtime:
-    runs-on: macos-14
-    timeout-minutes: 15
+    runs-on: macos-15-intel
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - name: Run 15 native macOS checks
+
+      - name: Run native Intel macOS platform checks
         shell: bash
         run: |
           set -euo pipefail
           C=0
           pass(){ C=$((C+1)); echo "MAC_PASS $C - $1"; }
+
+          test "$(uname -m)" = "x86_64" && pass intel-runner
+          test "$(sysctl -n hw.optional.x86_64 2>/dev/null || echo 0)" = "1" && pass x86-capability
           command -v /sbin/pfctl >/dev/null && pass pfctl
           command -v /sbin/route >/dev/null && pass route
           command -v /sbin/ifconfig >/dev/null && pass ifconfig
           command -v /usr/sbin/networksetup >/dev/null && pass networksetup
           command -v /usr/bin/security >/dev/null && pass security
           command -v /bin/launchctl >/dev/null && pass launchctl
+          command -v /usr/bin/dig >/dev/null && pass dig
+          command -v /usr/sbin/lsof >/dev/null && pass lsof
           zsh -n local-helper/highgas-tor && pass highgas-tor-zsh
           zsh -n local-helper/install.command && pass installer-zsh
+          zsh -n local-helper/uninstall.command && pass uninstaller-zsh
           id _www >/dev/null && pass isolated-user
           grep -Eq 'anchor[[:space:]]+"com\.apple/\*"' /etc/pf.conf && pass apple-anchor
 
-          cat >/tmp/highgas-pf-test.conf <<'EOF'
+          ROUTE_INFO="$(/sbin/route -n get default)"
+          GW="$(printf '%s\n' "$ROUTE_INFO" | awk '/gateway:/{print $2;exit}')"
+          DEV="$(printf '%s\n' "$ROUTE_INFO" | awk '/interface:/{print $2;exit}')"
+          test -n "$GW" && pass default-gateway
+          test -n "$DEV" && pass default-device
+          /sbin/ifconfig "$DEV" >/dev/null && pass physical-interface-live
+
+          SVC="$(/usr/sbin/networksetup -listnetworkserviceorder | awk -v dev="$DEV" '
+            /^\([0-9]+\) / {svc=$0; sub(/^\([0-9]+\) /,"",svc)}
+            index($0,"Device: "dev) {sub(/^\*/,"",svc); print svc; exit}
+          ')"
+          test -n "$SVC" && pass network-service-resolved
+
+          BASELINE="$(curl -4 -fsS --interface "$DEV" --connect-timeout 5 --max-time 15 https://lowgas.vercel.app/api/network-info)"
+          printf '%s' "$BASELINE" | grep -Eq '"ip"[[:space:]]*:' && pass direct-ip-baseline
+          /sbin/route -n get 1.1.1.1 | grep -q "interface: $DEV" && pass direct-route-baseline
+
+          cat >/tmp/highgas-pf-test.conf <<EOF
           pass out quick on lo0 all
-          pass out quick on en0 route-to (en0 192.0.2.1) inet proto tcp user _www keep state
-          block drop out quick on en0 inet all
+          pass out quick on $DEV route-to ($DEV $GW) inet proto tcp user _www keep state
+          block drop out quick on $DEV inet all
           block drop out quick inet6 all
           EOF
           sudo /sbin/pfctl -nf /tmp/highgas-pf-test.conf && pass pf-syntax
@@ -48,25 +73,146 @@ jobs:
             "https://github.com/xjasonlyu/tun2socks/releases/download/v${TUN2SOCKS_VERSION}/tun2socks-darwin-amd64.zip" \
             -o /tmp/tun2socks.zip
           echo "${TUN2SOCKS_AMD64_SHA256}  /tmp/tun2socks.zip" | shasum -a 256 -c - && pass tun2socks-sha
-          mkdir -p /tmp/t2s && unzip -q /tmp/tun2socks.zip -d /tmp/t2s
+          rm -rf /tmp/t2s && mkdir -p /tmp/t2s
+          unzip -q /tmp/tun2socks.zip -d /tmp/t2s
           TUN="$(find /tmp/t2s -type f -name 'tun2socks*' ! -name '*.zip' ! -name '*LICENSE*' -print -quit)"
           test -n "$TUN" && chmod +x "$TUN"
           file "$TUN" | grep -Eqi 'x86_64|x86-64' && pass tun2socks-intel
 
-          sudo "$TUN" -device utun230 -proxy socks5://127.0.0.1:9 -loglevel error >/tmp/t2s.log 2>&1 &
-          PID=$!
-          trap 'sudo kill "$PID" >/dev/null 2>&1 || true; sudo /sbin/route -q -n delete -inet 203.0.113.0/24 -interface utun230 >/dev/null 2>&1 || true' EXIT
-          for i in {1..40}; do
-            /sbin/ifconfig utun230 >/dev/null 2>&1 && break
+          UTUN=""
+          for n in $(seq 230 249); do
+            if ! /sbin/ifconfig "utun$n" >/dev/null 2>&1; then UTUN="utun$n"; break; fi
+          done
+          test -n "$UTUN" && pass free-utun-found
+
+          sudo "$TUN" -device "$UTUN" -proxy socks5://127.0.0.1:9 -loglevel error >/tmp/t2s.log 2>&1 &
+          TPID=$!
+          trap 'sudo kill "$TPID" >/dev/null 2>&1 || true; [[ -n "${UTUN:-}" ]] && sudo /sbin/route -q -n delete -inet 203.0.113.0/24 -interface "$UTUN" >/dev/null 2>&1 || true' EXIT
+          for i in $(seq 1 50); do
+            /sbin/ifconfig "$UTUN" >/dev/null 2>&1 && break
             sleep 0.2
           done
-          /sbin/ifconfig utun230 >/dev/null && pass utun-created
-          sudo /sbin/ifconfig utun230 inet 198.18.0.1 198.18.0.1 up
-          sudo /sbin/route -q -n add -inet 203.0.113.0/24 -interface utun230
-          /sbin/route -n get 203.0.113.1 | grep -q 'interface: utun230' && pass route-through-utun
-          sudo /sbin/route -q -n delete -inet 203.0.113.0/24 -interface utun230
-          sudo kill "$PID" >/dev/null 2>&1 || true
-          wait "$PID" 2>/dev/null || true
+          kill -0 "$TPID" >/dev/null 2>&1 && pass tun2socks-process-live
+          /sbin/ifconfig "$UTUN" >/dev/null && pass utun-created
+          sudo /sbin/ifconfig "$UTUN" inet 198.18.0.1 198.18.0.1 up
+          /sbin/ifconfig "$UTUN" | grep -q '198.18.0.1' && pass utun-addressed
+          sudo /sbin/route -q -n add -inet 203.0.113.0/24 -interface "$UTUN"
+          /sbin/route -n get 203.0.113.1 | grep -q "interface: $UTUN" && pass route-through-utun
+          sudo /sbin/route -q -n delete -inet 203.0.113.0/24 -interface "$UTUN"
+          /sbin/route -n get 203.0.113.1 2>/dev/null | grep -vq "interface: $UTUN" && pass route-restored
+          sudo kill "$TPID" >/dev/null 2>&1 || true
+          wait "$TPID" 2>/dev/null || true
+          for i in $(seq 1 30); do
+            /sbin/ifconfig "$UTUN" >/dev/null 2>&1 || break
+            sleep 0.1
+          done
+          ! /sbin/ifconfig "$UTUN" >/dev/null 2>&1 && pass utun-closed
           trap - EXIT
-          echo "TOTAL_MAC_RUNTIME_TESTS=$C"
-          test "$C" -ge 15
+
+          echo "PLATFORM_RUNTIME_TESTS=$C"
+          test "$C" -ge 30
+
+      - name: Run Tor Germany and US egress plus TUN chain checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          C=0
+          pass(){ C=$((C+1)); echo "TOR_PASS $C - $1"; }
+
+          curl --fail --location --retry 3 --retry-delay 2 \
+            "https://archive.torproject.org/tor-package-archive/torbrowser/${TOR_EXPERT_VERSION}/tor-expert-bundle-macos-x86_64-${TOR_EXPERT_VERSION}.tar.gz" \
+            -o /tmp/tor-intel.tar.gz
+          rm -rf /tmp/highgas-tor-test && mkdir -p /tmp/highgas-tor-test/bundle
+          tar -xzf /tmp/tor-intel.tar.gz -C /tmp/highgas-tor-test/bundle
+          TOR="/tmp/highgas-tor-test/bundle/tor/tor"
+          GEOIP="/tmp/highgas-tor-test/bundle/data/geoip"
+          GEOIP6="/tmp/highgas-tor-test/bundle/data/geoip6"
+          test -x "$TOR" && pass tor-binary
+          file "$TOR" | grep -Eqi 'x86_64|x86-64' && pass tor-intel
+          test -f "$GEOIP" && pass tor-geoip
+          test -f "$GEOIP6" && pass tor-geoip6
+
+          TUN="$(find /tmp/t2s -type f -name 'tun2socks*' ! -name '*.zip' ! -name '*LICENSE*' -print -quit)"
+          test -x "$TUN" && pass tun2socks-reused
+
+          check_country(){
+            local cc="$1" expected="$2" socks="$3" datadir="/tmp/highgas-tor-test/$cc" pidfile log raw ip country dnsip utun tpid target
+            rm -rf "$datadir" && mkdir -p "$datadir"
+            sudo chown -R _www "$datadir"
+
+            sudo "$TOR" \
+              --User _www \
+              --ClientOnly 1 \
+              --RunAsDaemon 1 \
+              --AvoidDiskWrites 1 \
+              --ClientUseIPv6 0 \
+              --SocksPort "127.0.0.1:$socks" \
+              --DNSPort "127.0.0.1:53" \
+              --DataDirectory "$datadir" \
+              --GeoIPFile "$GEOIP" \
+              --GeoIPv6File "$GEOIP6" \
+              --ExitNodes "{$cc}" \
+              --StrictNodes 1 \
+              --PidFile "$datadir/tor.pid" \
+              --Log "notice file $datadir/tor.log" >/dev/null 2>&1
+
+            pidfile="$datadir/tor.pid"
+            log="$datadir/tor.log"
+            for i in $(seq 1 150); do
+              grep -q 'Bootstrapped 100%' "$log" 2>/dev/null && break
+              sleep 1
+            done
+            test -s "$pidfile"
+            TORPID="$(cat "$pidfile")"
+            kill -0 "$TORPID" >/dev/null 2>&1 && pass "$cc-tor-process"
+            grep -q 'Bootstrapped 100%' "$log" && pass "$cc-bootstrap"
+            /usr/sbin/lsof -nP -a -p "$TORPID" -iTCP:"$socks" -sTCP:LISTEN >/dev/null && pass "$cc-socks-listener"
+            /usr/sbin/lsof -nP -a -p "$TORPID" -iUDP:53 >/dev/null && pass "$cc-dns53-listener"
+            dnsip="$(/usr/bin/dig +time=3 +tries=1 +short @127.0.0.1 -p 53 lowgas.vercel.app A | grep -E '^[0-9]+(\.[0-9]+){3}$' | head -1)"
+            test -n "$dnsip" && pass "$cc-dns-query"
+
+            raw="$(curl -4 -fsS --socks5-hostname "127.0.0.1:$socks" --connect-timeout 10 --max-time 30 https://lowgas.vercel.app/api/network-info)"
+            ip="$(printf '%s' "$raw" | sed -n 's/.*"ip"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+            country="$(printf '%s' "$raw" | sed -n 's/.*"country"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | tr '[:lower:]' '[:upper:]')"
+            test -n "$ip" && pass "$cc-egress-ip"
+            test "$country" = "$expected" && pass "$cc-country-$expected"
+
+            # End-to-end: uma conexão HTTPS normal é roteada por uma interface
+            # utun e entregue ao Tor pelo tun2socks, sem usar --socks no curl.
+            target="$dnsip"
+            utun=""
+            for n in $(seq 230 249); do
+              if ! /sbin/ifconfig "utun$n" >/dev/null 2>&1; then utun="utun$n"; break; fi
+            done
+            test -n "$utun"
+            sudo "$TUN" -device "$utun" -proxy "socks5://127.0.0.1:$socks" -loglevel error >"/tmp/t2s-$cc.log" 2>&1 &
+            tpid=$!
+            for i in $(seq 1 50); do
+              /sbin/ifconfig "$utun" >/dev/null 2>&1 && break
+              sleep 0.2
+            done
+            kill -0 "$tpid" >/dev/null 2>&1 && pass "$cc-tun-process"
+            /sbin/ifconfig "$utun" >/dev/null && pass "$cc-utun"
+            sudo /sbin/ifconfig "$utun" inet 198.18.0.1 198.18.0.1 up
+            sudo /sbin/route -q -n add -host "$target" -interface "$utun"
+            /sbin/route -n get "$target" | grep -q "interface: $utun" && pass "$cc-target-route"
+
+            raw="$(curl -4 -fsS --resolve "lowgas.vercel.app:443:$target" --connect-timeout 10 --max-time 35 https://lowgas.vercel.app/api/network-info)"
+            country="$(printf '%s' "$raw" | sed -n 's/.*"country"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | tr '[:lower:]' '[:upper:]')"
+            test "$country" = "$expected" && pass "$cc-tun-to-tor-country-$expected"
+
+            sudo /sbin/route -q -n delete -host "$target" -interface "$utun" >/dev/null 2>&1 || true
+            sudo kill "$tpid" >/dev/null 2>&1 || true
+            wait "$tpid" 2>/dev/null || true
+            sudo kill "$TORPID" >/dev/null 2>&1 || true
+            for i in $(seq 1 30); do
+              /usr/sbin/lsof -nP -iUDP:53 >/dev/null 2>&1 || break
+              sleep 0.1
+            done
+            ! /usr/sbin/lsof -nP -iUDP:53 >/dev/null 2>&1 && pass "$cc-dns-port-released"
+          }
+
+          check_country de DE 39150
+          check_country us US 39151
+          echo "TOR_RUNTIME_TESTS=$C"
+          test "$C" -ge 25
