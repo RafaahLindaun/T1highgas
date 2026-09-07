@@ -86,9 +86,12 @@ jobs:
           mkdir -p /tmp/tun2socks/intel /tmp/tun2socks/apple-silicon
           unzip -q /tmp/tun2socks-amd64.zip -d /tmp/tun2socks/intel
           unzip -q /tmp/tun2socks-arm64.zip -d /tmp/tun2socks/apple-silicon
-          TUN_INTEL="$(find /tmp/tun2socks/intel -type f -name tun2socks -print -quit)"
-          TUN_ARM="$(find /tmp/tun2socks/apple-silicon -type f -name tun2socks -print -quit)"
-          test -n "$TUN_INTEL" && test -n "$TUN_ARM"
+          echo 'Intel archive:' && find /tmp/tun2socks/intel -maxdepth 2 -type f -print
+          echo 'ARM archive:' && find /tmp/tun2socks/apple-silicon -maxdepth 2 -type f -print
+          TUN_INTEL="$(find /tmp/tun2socks/intel -type f -name 'tun2socks*' ! -name '*.zip' ! -name '*LICENSE*' -print -quit)"
+          TUN_ARM="$(find /tmp/tun2socks/apple-silicon -type f -name 'tun2socks*' ! -name '*.zip' ! -name '*LICENSE*' -print -quit)"
+          test -n "$TUN_INTEL" && test -f "$TUN_INTEL"
+          test -n "$TUN_ARM" && test -f "$TUN_ARM"
           cp "$TUN_INTEL" /tmp/tun2socks/intel/tun2socks-bin
           cp "$TUN_ARM" /tmp/tun2socks/apple-silicon/tun2socks-bin
           chmod +x /tmp/tun2socks/intel/tun2socks-bin /tmp/tun2socks/apple-silicon/tun2socks-bin
@@ -114,15 +117,15 @@ jobs:
             chmod +x "local-helper/dist/$out/tor-expert/tor/tor"
           done
 
-      - name: Run 36 HighGAS safety tests
+      - name: Run 48 HighGAS safety tests
         shell: bash
         run: |
           set -euo pipefail
           T=0
           ok(){ T=$((T+1)); echo "PASS $T - $1"; }
           must(){ "$@"; ok "$*"; }
-          has(){ grep -q -- "$2" "$1"; ok "$2"; }
-          lacks(){ ! grep -q -- "$2" "$1"; ok "sem $2"; }
+          has(){ grep -Fq -- "$2" "$1"; ok "$2"; }
+          lacks(){ ! grep -Fq -- "$2" "$1"; ok "sem $2"; }
 
           must zsh -n local-helper/highgas-tor
           must zsh -n local-helper/install.command
@@ -135,9 +138,14 @@ jobs:
           must test -x local-helper/dist/apple-silicon/highgas-helper
           must test -x local-helper/dist/apple-silicon/tun2socks
           must test -x local-helper/dist/apple-silicon/tor-expert/tor/tor
-          has local-helper/highgas-tor 'StrictNodes 1'
-          has local-helper/highgas-tor 'DNSPort'
-          has local-helper/highgas-tor 'ClientUseIPv6 0'
+          must bash -c "file local-helper/dist/intel/highgas-helper | grep -Eqi 'x86_64|x86-64'"
+          must bash -c "file local-helper/dist/intel/tun2socks | grep -Eqi 'x86_64|x86-64'"
+          must bash -c "file local-helper/dist/apple-silicon/highgas-helper | grep -Eqi 'arm64|aarch64'"
+          must bash -c "file local-helper/dist/apple-silicon/tun2socks | grep -Eqi 'arm64|aarch64'"
+          has local-helper/highgas-tor '--StrictNodes 1'
+          has local-helper/highgas-tor '--DNSPort'
+          has local-helper/highgas-tor '--ClientUseIPv6 0'
+          has local-helper/highgas-tor '--User "$PFUSER"'
           has local-helper/highgas-tor 'block drop out quick on $dev inet all'
           has local-helper/highgas-tor 'block drop out quick inet6 all'
           has local-helper/highgas-tor 'pass out quick on lo0 all'
@@ -156,12 +164,19 @@ jobs:
           has local-helper/install.command 'tun2socks'
           has local-helper/install.command 'HighGAS.webloc'
           has local-helper/install.command 'Full Tunnel'
+          has local-helper/install.command 'chmod 711 "$SYSTEM"'
+          has local-helper/install.command 'plutil -lint "$WEBLOC"'
           has local-helper/uninstall.command 'highgas-tor" down'
           has public/highgas-local-controller.js 'credentials: "same-origin"'
           has public/highgas-local-controller.js 'LOCAL_HOST'
+          has public/highgas-local-controller.js 'IP alterado'
+          has public/highgas-local-controller.js 'País correto'
+          has public/highgas-local-controller.js 'DNS protegido'
+          has public/highgas-local-controller.js 'IPv6 sem vazamento'
+          has public/highgas-local-controller.js 'Kill Switch'
           lacks local-helper/highgas-tor 'setsocksfirewallproxystate "$svc" on'
           echo "TOTAL_SAFETY_TESTS=$T"
-          test "$T" -ge 36
+          test "$T" -ge 48
 
       - uses: actions/upload-artifact@v4
         with:
@@ -193,6 +208,7 @@ jobs:
           command -v /usr/bin/security
           command -v /bin/launchctl
           id _www
+          grep -Eq 'anchor[[:space:]]+"com\.apple/\*"' /etc/pf.conf
 
           cat >/tmp/highgas-pf-test.conf <<'EOF'
           pass out quick on lo0 all
@@ -207,8 +223,9 @@ jobs:
             -o /tmp/tun2socks.zip
           echo "${TUN2SOCKS_AMD64_SHA256}  /tmp/tun2socks.zip" | shasum -a 256 -c -
           mkdir -p /tmp/t2s && unzip -q /tmp/tun2socks.zip -d /tmp/t2s
-          TUN="$(find /tmp/t2s -type f -name tun2socks -print -quit)"
-          test -n "$TUN"
+          find /tmp/t2s -maxdepth 2 -type f -print
+          TUN="$(find /tmp/t2s -type f -name 'tun2socks*' ! -name '*.zip' ! -name '*LICENSE*' -print -quit)"
+          test -n "$TUN" && test -f "$TUN"
           chmod +x "$TUN"
           file "$TUN" | grep -Eqi 'x86_64|x86-64'
 
