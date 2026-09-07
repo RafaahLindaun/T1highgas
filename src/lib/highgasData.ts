@@ -10,6 +10,8 @@ export type VpnServer = {
   sort_order: number;
 };
 
+export type CatalogSource = "neon" | "fallback";
+
 export const fallbackServers: VpnServer[] = [
   {
     id: 1,
@@ -70,10 +72,10 @@ export const fallbackServers: VpnServer[] = [
 
 export async function loadVpnServers(): Promise<{
   servers: VpnServer[];
-  source: "supabase" | "fallback";
+  source: CatalogSource;
 }> {
   try {
-    const response = await fetch("/api/servers", {
+    const response = await fetch(`/api/servers?ts=${Date.now()}`, {
       method: "GET",
       headers: { Accept: "application/json" },
       cache: "no-store",
@@ -92,9 +94,11 @@ export async function loadVpnServers(): Promise<{
         typeof server.code === "string"
     );
 
-    // Kept only as a backwards-compatible internal "cloud" flag for App.tsx.
+    const headerSource = response.headers.get("x-highgas-source");
+    const source: CatalogSource = headerSource === "neon" ? "neon" : "fallback";
+
     return usable.length
-      ? { servers: usable, source: "supabase" }
+      ? { servers: usable, source }
       : { servers: fallbackServers, source: "fallback" };
   } catch {
     return { servers: fallbackServers, source: "fallback" };
