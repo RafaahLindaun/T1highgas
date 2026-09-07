@@ -19,12 +19,15 @@ PFTOKEN="$RUNTIME/pf.token"
 PFANCHOR="com.apple/highgas"
 PFUSER="_www"
 SOCKS_PORT=39050
-DNS_PORT=39053
+# O resolver do macOS consulta DNS em 53; usar uma porta alta aqui faria
+# networksetup apontar para 127.0.0.1 sem existir um servidor DNS nessa porta.
+DNS_PORT=53
 TUN_ADDR="198.18.0.1"
 CHECK_URL="https://lowgas.vercel.app/api/network-info"
 IPV6_CHECK_URL="https://api64.ipify.org"
 # Cobre todo IPv4 público sem capturar 0/8 nem 127/8, preservando localhost.
 ROUTES=(1.0.0.0/8 2.0.0.0/7 4.0.0.0/6 8.0.0.0/5 16.0.0.0/4 32.0.0.0/3 64.0.0.0/2 128.0.0.0/1)
+ROUTE_PROBES=(1.1.1.1 2.2.2.2 4.4.4.4 8.8.8.8 16.0.0.1 32.0.0.1 64.0.0.1 128.0.0.1)
 
 /bin/mkdir -p "$RUNTIME" "$DATADIR" >/dev/null 2>&1 || true
 
@@ -92,6 +95,7 @@ restore_dns() {
   /usr/bin/killall -HUP mDNSResponder >/dev/null 2>&1 || true
 }
 
+# Remove configuração deixada por builds antigos que usavam proxy do sistema.
 restore_legacy_proxy() {
   local svc="$(state SERVICE)" proxy server port enabled
   [[ -n "$svc" ]] || return 0
@@ -114,6 +118,8 @@ remove_pf() {
 }
 
 down() {
+  # Ordem fail-closed: primeiro retira rotas TUN mantendo PF ativo; só depois
+  # restaura rede e remove o kill switch.
   restore_legacy_proxy || true
   remove_routes || true
   restore_dns || true
@@ -148,7 +154,7 @@ save_dns_state() {
 
 baseline_ip() {
   local dev="$1" raw
-  raw="$(/usr/bin/curl -4 -fsS --interface "$dev" --connect-timeout 4 --max-time 10 -H 'Accept: application/json' "$CHECK_URL?ts=$(/bin/date +%s)" 2>/dev/null || true)"
+  raw="$(/usr/bin/curl -4 -fsS --interface "$dev" --connect-timeout 4 --max-time 12 -H 'Accept: application/json' "$CHECK_URL?ts=$(/bin/date +%s)" 2>/dev/null || true)"
   print -r -- "$raw" | /usr/bin/sed -n 's/.*"ip"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p'
 }
 
@@ -177,12 +183,37 @@ EOF_PF
     return 1
   }
   /bin/rm -f "$rules"
+  # Elimina conexões diretas abertas antes do kill switch.
   /sbin/pfctl -F states >/dev/null 2>&1 || true
   return 0
 }
 
+dns_probe() {
+  [[ -x /usr/bin/dig ]] || return 1
+  /usr/bin/dig +time=3 +tries=1 +short @127.0.0.1 -p "$DNS_PORT" lowgas.vercel.app A 2>/dev/null | /usr/bin/grep -Eq '^[0-9]+(\.[0-9]+){3}$'
+}
+
+routes_ok() {
+  local iface="$1" probe routeif
+  [[ -n "$iface" ]] || return 1
+  for probe in "${ROUTE_PROBES[@]}"; do
+    routeif="$(/sbin/route -n get "$probe" 2>/dev/null | /usr/bin/awk '/interface:/{print $2;exit}')"
+    [[ "$routeif" == "$iface" ]] || return 1
+  done
+  return 0
+}
+
+tor_probe() {
+  local expected="$1" raw ip country
+  raw="$(/usr/bin/curl -4 -fsS --socks5-hostname "127.0.0.1:$SOCKS_PORT" --connect-timeout 8 --max-time 25 -H 'Accept: application/json' "$CHECK_URL?torprobe=$(/bin/date +%s)" 2>/dev/null || true)"
+  ip="$(print -r -- "$raw" | /usr/bin/sed -n 's/.*"ip"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+  country="$(print -r -- "$raw" | /usr/bin/sed -n 's/.*"country"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | /usr/bin/tr '[:lower:]' '[:upper:]')"
+  [[ -n "$ip" && "$country" == "$expected" ]] || return 1
+  print -r -- "$ip|$country"
+}
+
 quick_verify() {
-  local iface="$(state IFACE)" svc="$(state SERVICE)" dev="$(state DEVICE)" torpid="" tunpid="" dnsraw="" routeif="" pfrules=""
+  local iface="$(state IFACE)" svc="$(state SERVICE)" dev="$(state DEVICE)" torpid="" tunpid="" dnsraw="" pfrules=""
   [[ -s "$PIDFILE" && -s "$TUNPID" && -n "$iface" && -n "$svc" && -n "$dev" ]] || return 1
   torpid="$(/bin/cat "$PIDFILE" 2>/dev/null || true)"
   tunpid="$(/bin/cat "$TUNPID" 2>/dev/null || true)"
@@ -192,8 +223,9 @@ quick_verify() {
   /sbin/ifconfig "$iface" >/dev/null 2>&1 || return 1
   dnsraw="$(/usr/sbin/networksetup -getdnsservers "$svc" 2>/dev/null || true)"
   [[ "$dnsraw" == "127.0.0.1" ]] || return 1
-  routeif="$(/sbin/route -n get 1.1.1.1 2>/dev/null | /usr/bin/awk '/interface:/{print $2;exit}')"
-  [[ "$routeif" == "$iface" ]] || return 1
+  /usr/sbin/lsof -nP -a -p "$torpid" -iUDP:"$DNS_PORT" >/dev/null 2>&1 || return 1
+  dns_probe || return 1
+  routes_ok "$iface" || return 1
   pfrules="$(/sbin/pfctl -a "$PFANCHOR" -sr 2>/dev/null || true)"
   print -r -- "$pfrules" | /usr/bin/grep -q "block drop out quick on $dev inet" || return 1
   print -r -- "$pfrules" | /usr/bin/grep -q "block drop out quick inet6" || return 1
@@ -202,27 +234,28 @@ quick_verify() {
 
 verification_lines() {
   local expected="$(state EXPECTED)" baseline="$(state BASELINE_IP)" svc="$(state SERVICE)" iface="$(state IFACE)" dev="$(state DEVICE)"
-  local ip="" country="" raw="" dnsraw="" routeif="" pfrules="" ipv6ok=0 ipok=0 countryok=0 dnsok=0 routeok=0
+  local ip="" country="" raw="" dnsraw="" pfrules="" ipv6ok=0 ipok=0 countryok=0 dnsok=0 routeok=0 torpid=""
 
   if [[ -n "$expected" && -n "$iface" ]]; then
-    raw="$(/usr/bin/curl -4 -fsS --connect-timeout 5 --max-time 18 -H 'Accept: application/json' "$CHECK_URL?ts=$(/bin/date +%s)" 2>/dev/null || true)"
+    raw="$(/usr/bin/curl -4 -fsS --connect-timeout 6 --max-time 25 -H 'Accept: application/json' "$CHECK_URL?ts=$(/bin/date +%s)" 2>/dev/null || true)"
     ip="$(print -r -- "$raw" | /usr/bin/sed -n 's/.*"ip"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
     country="$(print -r -- "$raw" | /usr/bin/sed -n 's/.*"country"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | /usr/bin/tr '[:lower:]' '[:upper:]')"
     [[ -n "$ip" && -n "$baseline" && "$ip" != "$baseline" ]] && ipok=1
     [[ "$country" == "$expected" ]] && countryok=1
 
+    torpid="$(/bin/cat "$PIDFILE" 2>/dev/null || true)"
     dnsraw="$(/usr/sbin/networksetup -getdnsservers "$svc" 2>/dev/null || true)"
-    if [[ "$dnsraw" == "127.0.0.1" ]] && /usr/sbin/lsof -nP -a -p "$(/bin/cat "$PIDFILE" 2>/dev/null || echo 0)" -iUDP:"$DNS_PORT" >/dev/null 2>&1; then
+    if [[ "$dnsraw" == "127.0.0.1" && -n "$torpid" ]] && /usr/sbin/lsof -nP -a -p "$torpid" -iUDP:"$DNS_PORT" >/dev/null 2>&1 && dns_probe; then
       dnsok=1
     fi
 
-    if ! /usr/bin/curl -6 -fsS --connect-timeout 2 --max-time 4 "$IPV6_CHECK_URL" >/dev/null 2>&1; then
+    # IPv6 não é enviado ao Tor: é explicitamente bloqueado para não vazar.
+    if ! /usr/bin/curl -6 -fsS --connect-timeout 2 --max-time 5 "$IPV6_CHECK_URL" >/dev/null 2>&1; then
       ipv6ok=1
     fi
 
-    routeif="$(/sbin/route -n get 1.1.1.1 2>/dev/null | /usr/bin/awk '/interface:/{print $2;exit}')"
     pfrules="$(/sbin/pfctl -a "$PFANCHOR" -sr 2>/dev/null || true)"
-    if [[ "$routeif" == "$iface" ]] && print -r -- "$pfrules" | /usr/bin/grep -q "block drop out quick on $dev inet" && print -r -- "$pfrules" | /usr/bin/grep -q "block drop out quick inet6"; then
+    if routes_ok "$iface" && print -r -- "$pfrules" | /usr/bin/grep -q "block drop out quick on $dev inet" && print -r -- "$pfrules" | /usr/bin/grep -q "block drop out quick inet6"; then
       routeok=1
     fi
   fi
@@ -243,13 +276,14 @@ verification_lines() {
 }
 
 up() {
-  local server="$1" country expected routeinfo gw dev svc dnsstate dnsmode dnslist baseline iface torpid tunpid booted=0
+  local server="$1" country expected routeinfo gw dev svc dnsstate dnsmode dnslist baseline iface torpid tunpid booted=0 torprobe=""
   country="$(country_for_server "$server")" || { print -u2 "Tor gratuito disponível apenas para Alemanha e Estados Unidos"; return 64; }
   expected="${(U)country}"
 
   [[ -x "$TOR" ]] || { print -u2 "motor Tor não está instalado"; return 2; }
   [[ -x "$TUN2SOCKS" ]] || { print -u2 "motor Full Tunnel não está instalado"; return 2; }
   [[ -r "$GEOIP" && -r "$GEOIP6" ]] || { print -u2 "dados GeoIP do Tor não estão instalados"; return 2; }
+  [[ -x /usr/bin/dig ]] || { print -u2 "verificador DNS do macOS não foi encontrado"; return 2; }
   /usr/bin/id "$PFUSER" >/dev/null 2>&1 || { print -u2 "usuário seguro do sistema não encontrado"; return 2; }
 
   down >/dev/null 2>&1 || true
@@ -299,12 +333,22 @@ up() {
   torpid="$(/bin/cat "$PIDFILE" 2>/dev/null || true)"
   [[ -n "$torpid" ]] || { print -u2 "Tor iniciou sem registrar PID"; down >/dev/null 2>&1 || true; return 5; }
 
-  for _ in {1..100}; do
+  for _ in {1..120}; do
     if /usr/bin/grep -q "Bootstrapped 100%" "$LOG" 2>/dev/null; then booted=1; break; fi
     /bin/kill -0 "$torpid" >/dev/null 2>&1 || { print -u2 "Tor encerrou antes de conectar"; down >/dev/null 2>&1 || true; return 6; }
     /bin/sleep 1
   done
   [[ "$booted" -eq 1 ]] || { print -u2 "Tor demorou demais para conectar"; down >/dev/null 2>&1 || true; return 7; }
+
+  # Antes de tocar nas rotas do Mac, comprova que o circuito Tor escolhido
+  # realmente termina no país solicitado.
+  torprobe="$(tor_probe "$expected" 2>/dev/null || true)"
+  [[ -n "$torprobe" ]] || { print -u2 "o Tor conectou, mas não confirmou a saída $expected"; down >/dev/null 2>&1 || true; return 7; }
+
+  # Com DNSPort 53, o Tor precisa estar realmente escutando antes de apontar o
+  # resolver do macOS para 127.0.0.1.
+  /usr/sbin/lsof -nP -a -p "$torpid" -iUDP:"$DNS_PORT" >/dev/null 2>&1 || { print -u2 "o DNS protegido do Tor não iniciou"; down >/dev/null 2>&1 || true; return 7; }
+  dns_probe || { print -u2 "o DNS protegido não respondeu"; down >/dev/null 2>&1 || true; return 7; }
 
   iface="$(choose_utun)" || { print -u2 "não encontrei uma interface de túnel livre"; down >/dev/null 2>&1 || true; return 8; }
 
@@ -318,6 +362,7 @@ up() {
     print -r -- "EXPECTED=$expected"
     print -r -- "SERVER=$server"
     print -r -- "BASELINE_IP=$baseline"
+    print -r -- "TOR_PROBE_IP=${torprobe%%|*}"
     print -r -- "IFACE=$iface"
     print -r -- "STARTED_AT=$(/bin/date +%s)"
   } > "$STATE"
@@ -326,10 +371,13 @@ up() {
   # Fail-closed: o kill switch entra antes do túnel assumir o tráfego.
   pf_enable_and_load "$dev" "$gw" || { down >/dev/null 2>&1 || true; return 9; }
 
-  "$TUN2SOCKS" -device "$iface" -proxy "socks5://127.0.0.1:$SOCKS_PORT" -interface "$dev" >"$TUNLOG" 2>&1 &
+  # O proxy está em localhost. Não prender tun2socks à interface física: isso
+  # pode impedir a conexão com 127.0.0.1. Quem sai fisicamente é o Tor (_www),
+  # explicitamente autorizado pelo PF acima.
+  "$TUN2SOCKS" -device "$iface" -proxy "socks5://127.0.0.1:$SOCKS_PORT" >"$TUNLOG" 2>&1 &
   tunpid=$!
   print -r -- "$tunpid" > "$TUNPID"
-  for _ in {1..80}; do
+  for _ in {1..100}; do
     /sbin/ifconfig "$iface" >/dev/null 2>&1 && break
     /bin/kill -0 "$tunpid" >/dev/null 2>&1 || { print -u2 "o motor Full Tunnel encerrou ao iniciar"; down >/dev/null 2>&1 || true; return 10; }
     /bin/sleep 0.1
@@ -354,7 +402,7 @@ up() {
     return 13
   fi
 
-  # Mantém o formato compatível com o helper; só chega aqui se os 5 pontos passaram.
+  # Só chega aqui se IP, país, DNS, IPv6 e rotas/kill switch passaram.
   print -r -- "connected tor $country $server $(state STARTED_AT)"
 }
 
