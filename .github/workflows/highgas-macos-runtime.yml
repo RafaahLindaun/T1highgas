@@ -31,18 +31,11 @@ jobs:
           zsh -n local-helper/uninstall.command && pass uninstaller-syntax
           id _www >/dev/null && pass isolated-user
           grep -Eq 'anchor[[:space:]]+"com\.apple/\*"' /etc/pf.conf && pass apple-anchor
-
-          RI="$(/sbin/route -n get default)"
-          GW="$(printf '%s\n' "$RI" | awk '/gateway:/{print $2;exit}')"
-          DEV="$(printf '%s\n' "$RI" | awk '/interface:/{print $2;exit}')"
-          test -n "$GW" && pass default-gateway
-          test -n "$DEV" && pass default-device
-          /sbin/ifconfig "$DEV" >/dev/null && pass physical-interface
-          SVC="$(/usr/sbin/networksetup -listnetworkserviceorder | awk -v d="$DEV" '/^\([0-9]+\) /{s=$0;sub(/^\([0-9]+\) /,"",s)} index($0,"Device: "d){sub(/^\*/,"",s);print s;exit}')"
-          test -n "$SVC" && pass active-network-service
+          RI="$(/sbin/route -n get default)"; GW="$(printf '%s\n' "$RI" | awk '/gateway:/{print $2;exit}')"; DEV="$(printf '%s\n' "$RI" | awk '/interface:/{print $2;exit}')"
+          test -n "$GW" && pass default-gateway; test -n "$DEV" && pass default-device; /sbin/ifconfig "$DEV" >/dev/null && pass physical-interface
+          SVC="$(/usr/sbin/networksetup -listnetworkserviceorder | awk -v d="$DEV" '/^\([0-9]+\) /{s=$0;sub(/^\([0-9]+\) /,"",s)} index($0,"Device: "d){sub(/^\*/,"",s);print s;exit}')"; test -n "$SVC" && pass active-network-service
           curl -4 -fsS --interface "$DEV" --connect-timeout 5 --max-time 15 https://lowgas.vercel.app/api/network-info | grep -q '"ip"' && pass direct-ip-baseline
           /sbin/route -n get 1.1.1.1 | grep -q "interface: $DEV" && pass direct-route-baseline
-
           cat >/tmp/hg-pf.conf <<EOF
           pass out quick on lo0 all
           pass out quick on $DEV route-to ($DEV $GW) inet proto tcp user _www keep state
@@ -50,32 +43,22 @@ jobs:
           block drop out quick inet6 all
           EOF
           sudo /sbin/pfctl -nf /tmp/hg-pf.conf && pass pf-syntax
-
           curl -fL --retry 3 "https://github.com/xjasonlyu/tun2socks/releases/download/v${TUN2SOCKS_VERSION}/tun2socks-darwin-amd64.zip" -o /tmp/t2s.zip
           echo "${TUN2SOCKS_AMD64_SHA256}  /tmp/t2s.zip" | shasum -a 256 -c - && pass tun2socks-sha
           rm -rf /tmp/t2s && mkdir /tmp/t2s && unzip -q /tmp/t2s.zip -d /tmp/t2s
-          TUN="$(find /tmp/t2s -type f -name 'tun2socks*' ! -name '*.zip' ! -name '*LICENSE*' -print -quit)"
-          chmod +x "$TUN"; file "$TUN" | grep -Eqi 'x86_64|x86-64' && pass tun2socks-intel
-
+          TUN="$(find /tmp/t2s -type f -name 'tun2socks*' ! -name '*.zip' ! -name '*LICENSE*' -print -quit)"; chmod +x "$TUN"; file "$TUN" | grep -Eqi 'x86_64|x86-64' && pass tun2socks-intel
           NAME=/tmp/hg-utun; rm -f "$NAME"
           sudo /usr/bin/env WG_TUN_NAME_FILE="$NAME" "$TUN" --device utun --proxy socks5://127.0.0.1:9 --loglevel error >/tmp/t2s.log 2>&1 & TPID=$!
           trap 'sudo kill "$TPID" >/dev/null 2>&1 || true; [[ -n "${UTUN:-}" ]] && sudo /sbin/route -q -n delete -inet 203.0.113.0/24 -interface "$UTUN" >/dev/null 2>&1 || true' EXIT
           for i in $(seq 1 50); do test -s "$NAME" && break; sudo kill -0 "$TPID" 2>/dev/null || { cat /tmp/t2s.log; exit 1; }; sleep .2; done
-          test -s "$NAME" && pass utun-name-file
-          UTUN="$(sudo cat "$NAME" | tr -d '\r\n')"; [[ "$UTUN" =~ ^utun[0-9]+$ ]] && pass utun-name-valid
-          sudo kill -0 "$TPID" 2>/dev/null && pass tun2socks-live
-          /sbin/ifconfig "$UTUN" >/dev/null && pass utun-created
-          sudo /sbin/ifconfig "$UTUN" inet 198.18.0.1 198.18.0.1 up
-          /sbin/ifconfig "$UTUN" | grep -q 198.18.0.1 && pass utun-address
-          sudo /sbin/route -q -n add -inet 203.0.113.0/24 -interface "$UTUN"
-          /sbin/route -n get 203.0.113.1 | grep -q "interface: $UTUN" && pass route-through-utun
-          sudo /sbin/route -q -n delete -inet 203.0.113.0/24 -interface "$UTUN"
-          /sbin/route -n get 203.0.113.1 2>/dev/null | grep -vq "interface: $UTUN" && pass route-restored
+          test -s "$NAME" && pass utun-name-file; UTUN="$(sudo cat "$NAME" | tr -d '\r\n')"; [[ "$UTUN" =~ ^utun[0-9]+$ ]] && pass utun-name-valid
+          sudo kill -0 "$TPID" 2>/dev/null && pass tun2socks-live; /sbin/ifconfig "$UTUN" >/dev/null && pass utun-created
+          sudo /sbin/ifconfig "$UTUN" inet 198.18.0.1 198.18.0.1 up; /sbin/ifconfig "$UTUN" | grep -q 198.18.0.1 && pass utun-address
+          sudo /sbin/route -q -n add -inet 203.0.113.0/24 -interface "$UTUN"; /sbin/route -n get 203.0.113.1 | grep -q "interface: $UTUN" && pass route-through-utun
+          sudo /sbin/route -q -n delete -inet 203.0.113.0/24 -interface "$UTUN"; /sbin/route -n get 203.0.113.1 2>/dev/null | grep -vq "interface: $UTUN" && pass route-restored
           sudo kill "$TPID" 2>/dev/null || true; wait "$TPID" 2>/dev/null || true
-          for i in $(seq 1 30); do /sbin/ifconfig "$UTUN" >/dev/null 2>&1 || break; sleep .1; done
-          ! /sbin/ifconfig "$UTUN" >/dev/null 2>&1 && pass utun-closed
-          trap - EXIT
-          echo "PLATFORM_RUNTIME_TESTS=$C"; test "$C" -ge 31
+          for i in $(seq 1 30); do /sbin/ifconfig "$UTUN" >/dev/null 2>&1 || break; sleep .1; done; ! /sbin/ifconfig "$UTUN" >/dev/null 2>&1 && pass utun-closed
+          trap - EXIT; echo "PLATFORM_RUNTIME_TESTS=$C"; test "$C" -ge 31
 
       - name: Run Germany and US Tor egress plus TUN chain checks
         shell: bash
@@ -84,38 +67,33 @@ jobs:
           C=0; pass(){ C=$((C+1)); echo "TOR_PASS $C - $1"; }
           curl -fL --retry 3 "https://archive.torproject.org/tor-package-archive/torbrowser/${TOR_EXPERT_VERSION}/tor-expert-bundle-macos-x86_64-${TOR_EXPERT_VERSION}.tar.gz" -o /tmp/tor.tgz
           rm -rf /tmp/hg-tor && mkdir -p /tmp/hg-tor/bundle && tar -xzf /tmp/tor.tgz -C /tmp/hg-tor/bundle
+          chmod -R a+rX /tmp/hg-tor/bundle
           TOR=/tmp/hg-tor/bundle/tor/tor; GEO=/tmp/hg-tor/bundle/data/geoip; GEO6=/tmp/hg-tor/bundle/data/geoip6
-          test -x "$TOR" && pass tor-binary; file "$TOR" | grep -Eqi 'x86_64|x86-64' && pass tor-intel
-          test -f "$GEO" && pass geoip; test -f "$GEO6" && pass geoip6
+          test -x "$TOR" && pass tor-binary; file "$TOR" | grep -Eqi 'x86_64|x86-64' && pass tor-intel; test -f "$GEO" && pass geoip; test -f "$GEO6" && pass geoip6
           TUN="$(find /tmp/t2s -type f -name 'tun2socks*' ! -name '*.zip' ! -name '*LICENSE*' -print -quit)"; test -x "$TUN" && pass tun2socks-ready
+          sudo -u _www test -r "$GEO" && pass geoip-readable-by-tor; sudo -u _www test -r "$GEO6" && pass geoip6-readable-by-tor
 
           country_test(){
             cc="$1"; expected="$2"; socks="$3"; D="/tmp/hg-tor/$cc"; rm -rf "$D"; mkdir "$D"; sudo chown _www "$D"
-            sudo "$TOR" --User _www --ClientOnly 1 --RunAsDaemon 1 --AvoidDiskWrites 1 --ClientUseIPv6 0 --SocksPort "127.0.0.1:$socks" --DNSPort 127.0.0.1:53 --DataDirectory "$D" --GeoIPFile "$GEO" --GeoIPv6File "$GEO6" --ExitNodes "{$cc}" --StrictNodes 1 --PidFile "$D/tor.pid" --Log "notice file $D/tor.log" >/dev/null 2>&1
+            sudo "$TOR" --User _www --ClientOnly 1 --RunAsDaemon 1 --AvoidDiskWrites 1 --ClientUseIPv6 0 --SocksPort "127.0.0.1:$socks" --DNSPort 127.0.0.1:53 --DataDirectory "$D" --GeoIPFile "$GEO" --GeoIPv6File "$GEO6" --ExitNodes "{$cc}" --StrictNodes 1 --PidFile "$D/tor.pid" --Log "notice file $D/tor.log" >/tmp/tor-start-$cc.log 2>&1
             for i in $(seq 1 150); do sudo grep -q 'Bootstrapped 100%' "$D/tor.log" 2>/dev/null && break; sleep 1; done
-            test -s "$D/tor.pid"; P="$(sudo cat "$D/tor.pid")"; sudo kill -0 "$P" 2>/dev/null && pass "$cc-process"
-            sudo grep -q 'Bootstrapped 100%' "$D/tor.log" && pass "$cc-bootstrap"
-            sudo /usr/sbin/lsof -nP -a -p "$P" -iTCP:"$socks" -sTCP:LISTEN >/dev/null && pass "$cc-socks"
-            sudo /usr/sbin/lsof -nP -a -p "$P" -iUDP:53 >/dev/null && pass "$cc-dns53"
+            if ! sudo grep -q 'Bootstrapped 100%' "$D/tor.log"; then sudo tail -80 "$D/tor.log" || true; exit 1; fi
+            test -s "$D/tor.pid"; P="$(sudo cat "$D/tor.pid")"; sudo kill -0 "$P" 2>/dev/null && pass "$cc-process"; pass "$cc-bootstrap"
+            sudo /usr/sbin/lsof -nP -a -p "$P" -iTCP:"$socks" -sTCP:LISTEN >/dev/null && pass "$cc-socks"; sudo /usr/sbin/lsof -nP -a -p "$P" -iUDP:53 >/dev/null && pass "$cc-dns53"
             TARGET="$(/usr/bin/dig +time=3 +tries=1 +short @127.0.0.1 -p 53 lowgas.vercel.app A | grep -E '^[0-9]+(\.[0-9]+){3}$' | head -1)"; test -n "$TARGET" && pass "$cc-dns-query"
             RAW="$(curl -4 -fsS --socks5-hostname "127.0.0.1:$socks" --connect-timeout 10 --max-time 30 https://lowgas.vercel.app/api/network-info)"
             IP="$(printf '%s' "$RAW" | sed -n 's/.*"ip"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"; CT="$(printf '%s' "$RAW" | sed -n 's/.*"country"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | tr '[:lower:]' '[:upper:]')"
             test -n "$IP" && pass "$cc-egress-ip"; test "$CT" = "$expected" && pass "$cc-country"
-
             NAME="/tmp/hg-utun-$cc"; rm -f "$NAME"
             sudo /usr/bin/env WG_TUN_NAME_FILE="$NAME" "$TUN" --device utun --proxy "socks5://127.0.0.1:$socks" --loglevel error >"/tmp/t2s-$cc.log" 2>&1 & TP=$!
             for i in $(seq 1 50); do test -s "$NAME" && break; sudo kill -0 "$TP" 2>/dev/null || { cat "/tmp/t2s-$cc.log"; exit 1; }; sleep .2; done
             test -s "$NAME" && pass "$cc-utun-name"; U="$(sudo cat "$NAME" | tr -d '\r\n')"; [[ "$U" =~ ^utun[0-9]+$ ]] && pass "$cc-utun-valid"
             sudo kill -0 "$TP" 2>/dev/null && pass "$cc-tun-process"; /sbin/ifconfig "$U" >/dev/null && pass "$cc-utun-live"
-            sudo /sbin/ifconfig "$U" inet 198.18.0.1 198.18.0.1 up; sudo /sbin/route -q -n add -host "$TARGET" -interface "$U"
-            /sbin/route -n get "$TARGET" | grep -q "interface: $U" && pass "$cc-target-route"
-            RAW="$(curl -4 -fsS --resolve "lowgas.vercel.app:443:$TARGET" --connect-timeout 10 --max-time 35 https://lowgas.vercel.app/api/network-info)"
-            CT="$(printf '%s' "$RAW" | sed -n 's/.*"country"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | tr '[:lower:]' '[:upper:]')"; test "$CT" = "$expected" && pass "$cc-tun-to-tor"
+            sudo /sbin/ifconfig "$U" inet 198.18.0.1 198.18.0.1 up; sudo /sbin/route -q -n add -host "$TARGET" -interface "$U"; /sbin/route -n get "$TARGET" | grep -q "interface: $U" && pass "$cc-target-route"
+            RAW="$(curl -4 -fsS --resolve "lowgas.vercel.app:443:$TARGET" --connect-timeout 10 --max-time 35 https://lowgas.vercel.app/api/network-info)"; CT="$(printf '%s' "$RAW" | sed -n 's/.*"country"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | tr '[:lower:]' '[:upper:]')"; test "$CT" = "$expected" && pass "$cc-tun-to-tor"
             sudo /sbin/route -q -n delete -host "$TARGET" -interface "$U" >/dev/null 2>&1 || true; sudo kill "$TP" 2>/dev/null || true; wait "$TP" 2>/dev/null || true; sudo kill "$P" 2>/dev/null || true
-            for i in $(seq 1 30); do sudo /usr/sbin/lsof -nP -iUDP:53 >/dev/null 2>&1 || break; sleep .1; done
-            ! sudo /usr/sbin/lsof -nP -iUDP:53 >/dev/null 2>&1 && pass "$cc-cleanup"
+            for i in $(seq 1 30); do sudo /usr/sbin/lsof -nP -iUDP:53 >/dev/null 2>&1 || break; sleep .1; done; ! sudo /usr/sbin/lsof -nP -iUDP:53 >/dev/null 2>&1 && pass "$cc-cleanup"
           }
-
           country_test de DE 39150
           country_test us US 39151
-          echo "TOR_RUNTIME_TESTS=$C"; test "$C" -ge 29
+          echo "TOR_RUNTIME_TESTS=$C"; test "$C" -ge 31
