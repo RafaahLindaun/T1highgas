@@ -23,7 +23,8 @@ DNS_PORT=39053
 TUN_ADDR="198.18.0.1"
 CHECK_URL="https://lowgas.vercel.app/api/network-info"
 IPV6_CHECK_URL="https://api64.ipify.org"
-ROUTES=(1.0.0.0/8 2.0.0.0/7 4.0.0.0/6 8.0.0.0/5 16.0.0.0/4 32.0.0.0/3 64.0.0.0/2 128.0.0.0/1 198.18.0.0/15)
+# Cobre todo IPv4 público sem capturar 0/8 nem 127/8, preservando localhost.
+ROUTES=(1.0.0.0/8 2.0.0.0/7 4.0.0.0/6 8.0.0.0/5 16.0.0.0/4 32.0.0.0/3 64.0.0.0/2 128.0.0.0/1)
 
 /bin/mkdir -p "$RUNTIME" "$DATADIR" >/dev/null 2>&1 || true
 
@@ -48,9 +49,7 @@ service_for_device() {
 }
 
 default_route() {
-  local info
-  info="$(/sbin/route -n get default 2>/dev/null || true)"
-  print -r -- "$info"
+  /sbin/route -n get default 2>/dev/null || true
 }
 
 proxy_value() {
@@ -74,8 +73,8 @@ kill_pidfile() {
 
 remove_routes() {
   local iface="$(state IFACE)" r
+  [[ -n "$iface" ]] || return 0
   for r in "${ROUTES[@]}"; do
-    /sbin/route -q -n delete -inet "$r" "$TUN_ADDR" >/dev/null 2>&1 || \
     /sbin/route -q -n delete -inet "$r" -interface "$iface" >/dev/null 2>&1 || true
   done
 }
@@ -182,6 +181,25 @@ EOF_PF
   return 0
 }
 
+quick_verify() {
+  local iface="$(state IFACE)" svc="$(state SERVICE)" dev="$(state DEVICE)" torpid="" tunpid="" dnsraw="" routeif="" pfrules=""
+  [[ -s "$PIDFILE" && -s "$TUNPID" && -n "$iface" && -n "$svc" && -n "$dev" ]] || return 1
+  torpid="$(/bin/cat "$PIDFILE" 2>/dev/null || true)"
+  tunpid="$(/bin/cat "$TUNPID" 2>/dev/null || true)"
+  [[ -n "$torpid" && -n "$tunpid" ]] || return 1
+  /bin/kill -0 "$torpid" >/dev/null 2>&1 || return 1
+  /bin/kill -0 "$tunpid" >/dev/null 2>&1 || return 1
+  /sbin/ifconfig "$iface" >/dev/null 2>&1 || return 1
+  dnsraw="$(/usr/sbin/networksetup -getdnsservers "$svc" 2>/dev/null || true)"
+  [[ "$dnsraw" == "127.0.0.1" ]] || return 1
+  routeif="$(/sbin/route -n get 1.1.1.1 2>/dev/null | /usr/bin/awk '/interface:/{print $2;exit}')"
+  [[ "$routeif" == "$iface" ]] || return 1
+  pfrules="$(/sbin/pfctl -a "$PFANCHOR" -sr 2>/dev/null || true)"
+  print -r -- "$pfrules" | /usr/bin/grep -q "block drop out quick on $dev inet" || return 1
+  print -r -- "$pfrules" | /usr/bin/grep -q "block drop out quick inet6" || return 1
+  return 0
+}
+
 verification_lines() {
   local expected="$(state EXPECTED)" baseline="$(state BASELINE_IP)" svc="$(state SERVICE)" iface="$(state IFACE)" dev="$(state DEVICE)"
   local ip="" country="" raw="" dnsraw="" routeif="" pfrules="" ipv6ok=0 ipok=0 countryok=0 dnsok=0 routeok=0
@@ -204,7 +222,7 @@ verification_lines() {
 
     routeif="$(/sbin/route -n get 1.1.1.1 2>/dev/null | /usr/bin/awk '/interface:/{print $2;exit}')"
     pfrules="$(/sbin/pfctl -a "$PFANCHOR" -sr 2>/dev/null || true)"
-    if [[ "$routeif" == "$iface" ]] && print -r -- "$pfrules" | /usr/bin/grep -q "block drop out quick on $dev inet"; then
+    if [[ "$routeif" == "$iface" ]] && print -r -- "$pfrules" | /usr/bin/grep -q "block drop out quick on $dev inet" && print -r -- "$pfrules" | /usr/bin/grep -q "block drop out quick inet6"; then
       routeok=1
     fi
   fi
@@ -247,7 +265,7 @@ up() {
   dnsmode="${dnsstate%%|*}"
   dnslist="${dnsstate#*|}"
   baseline="$(baseline_ip "$dev")"
-  [[ -n "$baseline" ]] || { print -u2 "não consegui registrar o IP brasileiro antes de ligar"; return 3; }
+  [[ -n "$baseline" ]] || { print -u2 "não consegui registrar o IP anterior antes de ligar"; return 3; }
 
   /bin/rm -rf "$DATADIR"
   /bin/mkdir -p "$DATADIR"
@@ -305,6 +323,7 @@ up() {
   } > "$STATE"
   /bin/chmod 600 "$STATE"
 
+  # Fail-closed: o kill switch entra antes do túnel assumir o tráfego.
   pf_enable_and_load "$dev" "$gw" || { down >/dev/null 2>&1 || true; return 9; }
 
   "$TUN2SOCKS" -device "$iface" -proxy "socks5://127.0.0.1:$SOCKS_PORT" -interface "$dev" >"$TUNLOG" 2>&1 &
@@ -320,7 +339,7 @@ up() {
   /sbin/ifconfig "$iface" inet "$TUN_ADDR" "$TUN_ADDR" up >/dev/null
   local r
   for r in "${ROUTES[@]}"; do
-    /sbin/route -q -n add -inet "$r" "$TUN_ADDR" >/dev/null 2>&1 || { print -u2 "não consegui proteger a rota $r"; down >/dev/null 2>&1 || true; return 11; }
+    /sbin/route -q -n add -inet "$r" -interface "$iface" >/dev/null 2>&1 || { print -u2 "não consegui proteger a rota $r"; down >/dev/null 2>&1 || true; return 11; }
   done
   /usr/sbin/networksetup -setdnsservers "$svc" 127.0.0.1 >/dev/null || { print -u2 "não consegui proteger o DNS"; down >/dev/null 2>&1 || true; return 12; }
   /usr/bin/killall -HUP mDNSResponder >/dev/null 2>&1 || true
@@ -335,23 +354,19 @@ up() {
     return 13
   fi
 
-  print -r -- "connected fulltor $country $server $iface"
+  # Mantém o formato compatível com o helper; só chega aqui se os 5 pontos passaram.
+  print -r -- "connected tor $country $server $(state STARTED_AT)"
 }
 
 status() {
   if [[ ! -f "$STATE" ]]; then print -r -- "disconnected"; return 0; fi
-  local torpid="$(/bin/cat "$PIDFILE" 2>/dev/null || true)" tunpid="$(/bin/cat "$TUNPID" 2>/dev/null || true)" iface="$(state IFACE)" server="$(state SERVER)" country="$(state COUNTRY)" started="$(state STARTED_AT)"
-  if [[ -z "$torpid" || -z "$tunpid" || -z "$iface" ]] || ! /bin/kill -0 "$torpid" >/dev/null 2>&1 || ! /bin/kill -0 "$tunpid" >/dev/null 2>&1 || ! /sbin/ifconfig "$iface" >/dev/null 2>&1; then
+  local server="$(state SERVER)" country="$(state COUNTRY)" started="$(state STARTED_AT)"
+  if ! quick_verify; then
     down >/dev/null 2>&1 || true
     print -r -- "disconnected"
     return 0
   fi
-  if ! verification_lines >/dev/null 2>&1; then
-    down >/dev/null 2>&1 || true
-    print -r -- "disconnected"
-    return 0
-  fi
-  print -r -- "connected fulltor $country $server $started $iface"
+  print -r -- "connected tor $country $server $started"
 }
 
 verify() {
