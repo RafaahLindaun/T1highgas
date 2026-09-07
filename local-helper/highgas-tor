@@ -5,17 +5,27 @@ export LC_ALL=C
 BASE="/Library/Application Support/HighGAS"
 TORROOT="$BASE/tor-expert"
 TOR="$TORROOT/tor/tor"
+TUN2SOCKS="$BASE/tun2socks"
 GEOIP="$TORROOT/data/geoip"
 GEOIP6="$TORROOT/data/geoip6"
-DATADIR="$BASE/tor-data"
+RUNTIME="$BASE/tor-runtime"
+DATADIR="$RUNTIME/data"
 STATE="$BASE/tor-state"
-PIDFILE="$BASE/tor.pid"
-LOG="$BASE/tor.log"
+PIDFILE="$RUNTIME/tor.pid"
+TUNPID="$RUNTIME/tun2socks.pid"
+LOG="$RUNTIME/tor.log"
+TUNLOG="$RUNTIME/tun2socks.log"
+PFTOKEN="$RUNTIME/pf.token"
+PFANCHOR="com.apple/highgas"
+PFUSER="_www"
 SOCKS_PORT=39050
 DNS_PORT=39053
+TUN_ADDR="198.18.0.1"
 CHECK_URL="https://lowgas.vercel.app/api/network-info"
+IPV6_CHECK_URL="https://api64.ipify.org"
+ROUTES=(1.0.0.0/8 2.0.0.0/7 4.0.0.0/6 8.0.0.0/5 16.0.0.0/4 32.0.0.0/3 64.0.0.0/2 128.0.0.0/1 198.18.0.0/15)
 
-/bin/mkdir -p "$DATADIR" >/dev/null 2>&1 || true
+/bin/mkdir -p "$RUNTIME" "$DATADIR" >/dev/null 2>&1 || true
 
 state() {
   [[ -f "$STATE" ]] || return 0
@@ -37,12 +47,10 @@ service_for_device() {
   '
 }
 
-default_service() {
-  local routeinfo dev
-  routeinfo="$(/sbin/route -n get default 2>/dev/null || true)"
-  dev="$(print -r -- "$routeinfo" | /usr/bin/awk '/interface:/{print $2;exit}')"
-  [[ -n "$dev" ]] || return 1
-  service_for_device "$dev"
+default_route() {
+  local info
+  info="$(/sbin/route -n get default 2>/dev/null || true)"
+  print -r -- "$info"
 }
 
 proxy_value() {
@@ -50,115 +58,208 @@ proxy_value() {
   print -r -- "$data" | /usr/bin/awk -F': ' -v k="$key" '$1==k{print $2;exit}'
 }
 
-kill_tor() {
-  local pid=""
-  if [[ -s "$PIDFILE" ]]; then
-    pid="$(/bin/cat "$PIDFILE" 2>/dev/null || true)"
-  fi
+kill_pidfile() {
+  local file="$1" pid=""
+  [[ -s "$file" ]] && pid="$(/bin/cat "$file" 2>/dev/null || true)"
   if [[ -n "$pid" ]] && /bin/kill -0 "$pid" >/dev/null 2>&1; then
     /bin/kill "$pid" >/dev/null 2>&1 || true
-    for _ in {1..20}; do
+    for _ in {1..30}; do
       /bin/kill -0 "$pid" >/dev/null 2>&1 || break
       /bin/sleep 0.1
     done
     /bin/kill -9 "$pid" >/dev/null 2>&1 || true
   fi
-  /bin/rm -f "$PIDFILE" >/dev/null 2>&1 || true
+  /bin/rm -f "$file" >/dev/null 2>&1 || true
 }
 
-restore_network() {
-  [[ -f "$STATE" ]] || return 0
+remove_routes() {
+  local iface="$(state IFACE)" r
+  for r in "${ROUTES[@]}"; do
+    /sbin/route -q -n delete -inet "$r" "$TUN_ADDR" >/dev/null 2>&1 || \
+    /sbin/route -q -n delete -inet "$r" -interface "$iface" >/dev/null 2>&1 || true
+  done
+}
 
-  local svc dnsmode dnslist bypassmode bypasslist proxy current_server current_port current_enabled
-  svc="$(state SERVICE)"
-  dnsmode="$(state DNSMODE)"
-  dnslist="$(state DNSLIST)"
-  bypassmode="$(state BYPASSMODE)"
-  bypasslist="$(state BYPASSLIST)"
-
-  if [[ -n "$svc" ]]; then
-    proxy="$(/usr/sbin/networksetup -getsocksfirewallproxy "$svc" 2>/dev/null || true)"
-    current_server="$(proxy_value Server "$proxy")"
-    current_port="$(proxy_value Port "$proxy")"
-    current_enabled="$(proxy_value Enabled "$proxy")"
-
-    if [[ "$current_enabled" == "Yes" && "$current_server" == "127.0.0.1" && "$current_port" == "$SOCKS_PORT" ]]; then
-      /usr/sbin/networksetup -setsocksfirewallproxystate "$svc" off >/dev/null 2>&1 || true
-    fi
-
-    if [[ "$dnsmode" == "list" && -n "$dnslist" ]]; then
-      local -a dnsarr
-      dnsarr=( ${(s:,:)dnslist} )
-      /usr/sbin/networksetup -setdnsservers "$svc" "${dnsarr[@]}" >/dev/null 2>&1 || true
-    else
-      /usr/sbin/networksetup -setdnsservers "$svc" Empty >/dev/null 2>&1 || true
-    fi
-
-    if [[ "$bypassmode" == "list" && -n "$bypasslist" ]]; then
-      local -a bypassarr
-      bypassarr=( ${(s:,:)bypasslist} )
-      /usr/sbin/networksetup -setproxybypassdomains "$svc" "${bypassarr[@]}" >/dev/null 2>&1 || true
-    else
-      /usr/sbin/networksetup -setproxybypassdomains "$svc" Empty >/dev/null 2>&1 || true
-    fi
+restore_dns() {
+  local svc="$(state SERVICE)" mode="$(state DNSMODE)" list="$(state DNSLIST)"
+  [[ -n "$svc" ]] || return 0
+  if [[ "$mode" == "list" && -n "$list" ]]; then
+    local -a arr
+    arr=( ${(s:,:)list} )
+    /usr/sbin/networksetup -setdnsservers "$svc" "${arr[@]}" >/dev/null 2>&1 || true
+  else
+    /usr/sbin/networksetup -setdnsservers "$svc" Empty >/dev/null 2>&1 || true
   fi
-
   /usr/bin/killall -HUP mDNSResponder >/dev/null 2>&1 || true
 }
 
+restore_legacy_proxy() {
+  local svc="$(state SERVICE)" proxy server port enabled
+  [[ -n "$svc" ]] || return 0
+  proxy="$(/usr/sbin/networksetup -getsocksfirewallproxy "$svc" 2>/dev/null || true)"
+  server="$(proxy_value Server "$proxy")"
+  port="$(proxy_value Port "$proxy")"
+  enabled="$(proxy_value Enabled "$proxy")"
+  if [[ "$enabled" == "Yes" && "$server" == "127.0.0.1" && "$port" == "$SOCKS_PORT" ]]; then
+    /usr/sbin/networksetup -setsocksfirewallproxystate "$svc" off >/dev/null 2>&1 || true
+  fi
+}
+
+remove_pf() {
+  /sbin/pfctl -a "$PFANCHOR" -F all >/dev/null 2>&1 || true
+  if [[ -s "$PFTOKEN" ]]; then
+    local token="$(/bin/cat "$PFTOKEN" 2>/dev/null || true)"
+    [[ -n "$token" ]] && /sbin/pfctl -X "$token" >/dev/null 2>&1 || true
+  fi
+  /bin/rm -f "$PFTOKEN" >/dev/null 2>&1 || true
+}
+
 down() {
-  restore_network || true
-  kill_tor || true
+  restore_legacy_proxy || true
+  remove_routes || true
+  restore_dns || true
+  remove_pf || true
+  kill_pidfile "$TUNPID" || true
+  kill_pidfile "$PIDFILE" || true
   /bin/rm -f "$STATE" >/dev/null 2>&1 || true
+  /usr/bin/killall -HUP mDNSResponder >/dev/null 2>&1 || true
   print -r -- "disconnected"
 }
 
-up() {
-  local server="$1" country expected svc proxy enabled dnsraw dnsmode dnslist bypassraw bypassmode bypasslist
-  local booted=0 pid="" raw="" got="" verified=0
+choose_utun() {
+  local n
+  for n in {230..249}; do
+    if ! /sbin/ifconfig "utun$n" >/dev/null 2>&1; then
+      print -r -- "utun$n"
+      return 0
+    fi
+  done
+  return 1
+}
 
+save_dns_state() {
+  local svc="$1" raw
+  raw="$(/usr/sbin/networksetup -getdnsservers "$svc" 2>/dev/null || true)"
+  if [[ -z "$raw" || "$raw" == There\ aren't\ any* ]]; then
+    print -r -- "empty|"
+  else
+    print -r -- "list|${raw//$'\n'/,}"
+  fi
+}
+
+baseline_ip() {
+  local dev="$1" raw
+  raw="$(/usr/bin/curl -4 -fsS --interface "$dev" --connect-timeout 4 --max-time 10 -H 'Accept: application/json' "$CHECK_URL?ts=$(/bin/date +%s)" 2>/dev/null || true)"
+  print -r -- "$raw" | /usr/bin/sed -n 's/.*"ip"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p'
+}
+
+pf_enable_and_load() {
+  local dev="$1" gw="$2" status rules token=""
+  rules="$(/usr/bin/mktemp -t highgas-pf).conf"
+  cat > "$rules" <<EOF_PF
+pass out quick on lo0 all
+pass out quick on $dev route-to ($dev $gw) inet proto tcp user $PFUSER keep state
+block drop out quick on $dev inet all
+block drop out quick inet6 all
+EOF_PF
+
+  /sbin/pfctl -nf "$rules" >/dev/null 2>&1 || { /bin/rm -f "$rules"; print -u2 "o kill switch do macOS rejeitou as regras de segurança"; return 1; }
+
+  status="$(/sbin/pfctl -s info 2>/dev/null | /usr/bin/awk '/Status:/{print $2;exit}')"
+  if [[ "$status" != "Enabled" ]]; then
+    token="$(/sbin/pfctl -E 2>&1 | /usr/bin/sed -n 's/.*Token[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p' | /usr/bin/tail -1)"
+    [[ -n "$token" ]] && print -r -- "$token" > "$PFTOKEN"
+  fi
+
+  /sbin/pfctl -a "$PFANCHOR" -f "$rules" >/dev/null 2>&1 || {
+    /bin/rm -f "$rules"
+    remove_pf
+    print -u2 "não consegui ativar o kill switch do HighGAS"
+    return 1
+  }
+  /bin/rm -f "$rules"
+  /sbin/pfctl -F states >/dev/null 2>&1 || true
+  return 0
+}
+
+verification_lines() {
+  local expected="$(state EXPECTED)" baseline="$(state BASELINE_IP)" svc="$(state SERVICE)" iface="$(state IFACE)" dev="$(state DEVICE)"
+  local ip="" country="" raw="" dnsraw="" routeif="" pfrules="" ipv6ok=0 ipok=0 countryok=0 dnsok=0 routeok=0
+
+  if [[ -n "$expected" && -n "$iface" ]]; then
+    raw="$(/usr/bin/curl -4 -fsS --connect-timeout 5 --max-time 18 -H 'Accept: application/json' "$CHECK_URL?ts=$(/bin/date +%s)" 2>/dev/null || true)"
+    ip="$(print -r -- "$raw" | /usr/bin/sed -n 's/.*"ip"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+    country="$(print -r -- "$raw" | /usr/bin/sed -n 's/.*"country"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | /usr/bin/tr '[:lower:]' '[:upper:]')"
+    [[ -n "$ip" && -n "$baseline" && "$ip" != "$baseline" ]] && ipok=1
+    [[ "$country" == "$expected" ]] && countryok=1
+
+    dnsraw="$(/usr/sbin/networksetup -getdnsservers "$svc" 2>/dev/null || true)"
+    if [[ "$dnsraw" == "127.0.0.1" ]] && /usr/sbin/lsof -nP -a -p "$(/bin/cat "$PIDFILE" 2>/dev/null || echo 0)" -iUDP:"$DNS_PORT" >/dev/null 2>&1; then
+      dnsok=1
+    fi
+
+    if ! /usr/bin/curl -6 -fsS --connect-timeout 2 --max-time 4 "$IPV6_CHECK_URL" >/dev/null 2>&1; then
+      ipv6ok=1
+    fi
+
+    routeif="$(/sbin/route -n get 1.1.1.1 2>/dev/null | /usr/bin/awk '/interface:/{print $2;exit}')"
+    pfrules="$(/sbin/pfctl -a "$PFANCHOR" -sr 2>/dev/null || true)"
+    if [[ "$routeif" == "$iface" ]] && print -r -- "$pfrules" | /usr/bin/grep -q "block drop out quick on $dev inet"; then
+      routeok=1
+    fi
+  fi
+
+  print -r -- "IP=$ip"
+  print -r -- "COUNTRY=$country"
+  print -r -- "IP_CHANGED=$ipok"
+  print -r -- "COUNTRY_OK=$countryok"
+  print -r -- "DNS_OK=$dnsok"
+  print -r -- "IPV6_OK=$ipv6ok"
+  print -r -- "ROUTE_OK=$routeok"
+  if [[ "$ipok" -eq 1 && "$countryok" -eq 1 && "$dnsok" -eq 1 && "$ipv6ok" -eq 1 && "$routeok" -eq 1 ]]; then
+    print -r -- "VERIFIED=1"
+    return 0
+  fi
+  print -r -- "VERIFIED=0"
+  return 1
+}
+
+up() {
+  local server="$1" country expected routeinfo gw dev svc dnsstate dnsmode dnslist baseline iface torpid tunpid booted=0
   country="$(country_for_server "$server")" || { print -u2 "Tor gratuito disponível apenas para Alemanha e Estados Unidos"; return 64; }
   expected="${(U)country}"
 
   [[ -x "$TOR" ]] || { print -u2 "motor Tor não está instalado"; return 2; }
+  [[ -x "$TUN2SOCKS" ]] || { print -u2 "motor Full Tunnel não está instalado"; return 2; }
   [[ -r "$GEOIP" && -r "$GEOIP6" ]] || { print -u2 "dados GeoIP do Tor não estão instalados"; return 2; }
+  /usr/bin/id "$PFUSER" >/dev/null 2>&1 || { print -u2 "usuário seguro do sistema não encontrado"; return 2; }
 
   down >/dev/null 2>&1 || true
 
-  svc="$(default_service)" || { print -u2 "não consegui identificar a conexão de internet ativa"; return 3; }
-  [[ -n "$svc" ]] || { print -u2 "não consegui identificar o serviço de rede ativo"; return 3; }
+  routeinfo="$(default_route)"
+  gw="$(print -r -- "$routeinfo" | /usr/bin/awk '/gateway:/{print $2;exit}')"
+  dev="$(print -r -- "$routeinfo" | /usr/bin/awk '/interface:/{print $2;exit}')"
+  [[ -n "$gw" && -n "$dev" ]] || { print -u2 "não consegui identificar a rota física de internet"; return 3; }
+  svc="$(service_for_device "$dev")"
+  [[ -n "$svc" ]] || { print -u2 "não consegui identificar o serviço de internet ativo"; return 3; }
 
-  proxy="$(/usr/sbin/networksetup -getsocksfirewallproxy "$svc" 2>/dev/null || true)"
-  enabled="$(proxy_value Enabled "$proxy")"
-  if [[ "$enabled" == "Yes" ]]; then
-    print -u2 "já existe um proxy SOCKS configurado no macOS; o HighGAS não vai sobrescrevê-lo"
-    return 4
-  fi
+  dnsstate="$(save_dns_state "$svc")"
+  dnsmode="${dnsstate%%|*}"
+  dnslist="${dnsstate#*|}"
+  baseline="$(baseline_ip "$dev")"
+  [[ -n "$baseline" ]] || { print -u2 "não consegui registrar o IP brasileiro antes de ligar"; return 3; }
 
-  dnsraw="$(/usr/sbin/networksetup -getdnsservers "$svc" 2>/dev/null || true)"
-  if [[ -z "$dnsraw" || "$dnsraw" == There\ aren't\ any* ]]; then
-    dnsmode="empty"
-    dnslist=""
-  else
-    dnsmode="list"
-    dnslist="${dnsraw//$'\n'/,}"
-  fi
-
-  bypassraw="$(/usr/sbin/networksetup -getproxybypassdomains "$svc" 2>/dev/null || true)"
-  if [[ -z "$bypassraw" || "$bypassraw" == There\ aren't\ any* ]]; then
-    bypassmode="empty"
-    bypasslist=""
-  else
-    bypassmode="list"
-    bypasslist="${bypassraw//$'\n'/,}"
-  fi
-
+  /bin/rm -rf "$DATADIR"
   /bin/mkdir -p "$DATADIR"
-  /bin/chmod 700 "$DATADIR" >/dev/null 2>&1 || true
+  /usr/sbin/chown -R "$PFUSER" "$RUNTIME"
+  /bin/chmod 700 "$RUNTIME" "$DATADIR" >/dev/null 2>&1 || true
   : > "$LOG"
-  /bin/rm -f "$PIDFILE"
+  : > "$TUNLOG"
+  /usr/sbin/chown "$PFUSER" "$LOG" "$TUNLOG"
+  /bin/rm -f "$PIDFILE" "$TUNPID" "$PFTOKEN"
 
   "$TOR" \
+    --User "$PFUSER" \
     --ClientOnly 1 \
     --RunAsDaemon 1 \
     --AvoidDiskWrites 1 \
@@ -169,132 +270,97 @@ up() {
     --GeoIPFile "$GEOIP" \
     --GeoIPv6File "$GEOIP6" \
     --ExitNodes "{$country}" \
+    --StrictNodes 1 \
     --PidFile "$PIDFILE" \
-    --Log "notice file $LOG" >/dev/null 2>&1 || {
-      print -u2 "o Tor não conseguiu iniciar"
-      kill_tor
-      return 5
-    }
+    --Log "notice file $LOG" >/dev/null 2>&1 || { print -u2 "o Tor não conseguiu iniciar"; down >/dev/null 2>&1 || true; return 5; }
 
-  for _ in {1..50}; do
+  for _ in {1..100}; do
     [[ -s "$PIDFILE" ]] && break
     /bin/sleep 0.1
   done
-  pid="$(/bin/cat "$PIDFILE" 2>/dev/null || true)"
-  [[ -n "$pid" ]] || { print -u2 "Tor iniciou sem registrar PID"; kill_tor; return 5; }
+  torpid="$(/bin/cat "$PIDFILE" 2>/dev/null || true)"
+  [[ -n "$torpid" ]] || { print -u2 "Tor iniciou sem registrar PID"; down >/dev/null 2>&1 || true; return 5; }
 
-  for _ in {1..90}; do
-    if /usr/bin/grep -q "Bootstrapped 100%" "$LOG" 2>/dev/null; then
-      booted=1
-      break
-    fi
-    if ! /bin/kill -0 "$pid" >/dev/null 2>&1; then
-      print -u2 "Tor encerrou antes de conectar à rede"
-      kill_tor
-      return 6
-    fi
+  for _ in {1..100}; do
+    if /usr/bin/grep -q "Bootstrapped 100%" "$LOG" 2>/dev/null; then booted=1; break; fi
+    /bin/kill -0 "$torpid" >/dev/null 2>&1 || { print -u2 "Tor encerrou antes de conectar"; down >/dev/null 2>&1 || true; return 6; }
     /bin/sleep 1
   done
+  [[ "$booted" -eq 1 ]] || { print -u2 "Tor demorou demais para conectar"; down >/dev/null 2>&1 || true; return 7; }
 
-  [[ "$booted" -eq 1 ]] || {
-    print -u2 "Tor demorou demais para conectar; tente novamente"
-    kill_tor
-    return 7
-  }
-
-  # Confere o país pelo mesmo endpoint que o painel usa. Se a consulta estiver
-  # temporariamente indisponível, a seleção ExitNodes do próprio Tor continua valendo.
-  for _ in {1..4}; do
-    raw="$(/usr/bin/curl -fsS --max-time 12 --socks5-hostname "127.0.0.1:$SOCKS_PORT" "$CHECK_URL?ts=$(/bin/date +%s)" 2>/dev/null || true)"
-    got="$(print -r -- "$raw" | /usr/bin/sed -n 's/.*"country"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | /usr/bin/tr '[:lower:]' '[:upper:]')"
-    if [[ "$got" == "$expected" ]]; then
-      verified=1
-      break
-    fi
-    if [[ -n "$got" && "$got" != "$expected" ]]; then
-      /bin/sleep 1
-      continue
-    fi
-    /bin/sleep 1
-  done
-
-  if [[ -n "$got" && "$verified" -ne 1 ]]; then
-    print -u2 "a saída Tor não correspondeu ao país solicitado ($got em vez de $expected)"
-    kill_tor
-    return 8
-  fi
+  iface="$(choose_utun)" || { print -u2 "não encontrei uma interface de túnel livre"; down >/dev/null 2>&1 || true; return 8; }
 
   {
     print -r -- "SERVICE=$svc"
+    print -r -- "DEVICE=$dev"
+    print -r -- "GATEWAY=$gw"
     print -r -- "DNSMODE=$dnsmode"
     print -r -- "DNSLIST=$dnslist"
-    print -r -- "BYPASSMODE=$bypassmode"
-    print -r -- "BYPASSLIST=$bypasslist"
     print -r -- "COUNTRY=$country"
+    print -r -- "EXPECTED=$expected"
     print -r -- "SERVER=$server"
+    print -r -- "BASELINE_IP=$baseline"
+    print -r -- "IFACE=$iface"
     print -r -- "STARTED_AT=$(/bin/date +%s)"
   } > "$STATE"
   /bin/chmod 600 "$STATE"
 
-  local -a bypassarr
-  bypassarr=()
-  if [[ "$bypassmode" == "list" && -n "$bypasslist" ]]; then
-    bypassarr=( ${(s:,:)bypasslist} )
-  fi
-  bypassarr+=("localhost" "127.0.0.1")
+  pf_enable_and_load "$dev" "$gw" || { down >/dev/null 2>&1 || true; return 9; }
 
-  if ! /usr/sbin/networksetup -setproxybypassdomains "$svc" "${bypassarr[@]}" >/dev/null 2>&1 || \
-     ! /usr/sbin/networksetup -setdnsservers "$svc" 127.0.0.1 >/dev/null 2>&1 || \
-     ! /usr/sbin/networksetup -setsocksfirewallproxy "$svc" 127.0.0.1 "$SOCKS_PORT" off >/dev/null 2>&1 || \
-     ! /usr/sbin/networksetup -setsocksfirewallproxystate "$svc" on >/dev/null 2>&1; then
-    print -u2 "não consegui ativar o proxy Tor no macOS"
-    down >/dev/null 2>&1 || true
-    return 9
-  fi
+  "$TUN2SOCKS" -device "$iface" -proxy "socks5://127.0.0.1:$SOCKS_PORT" -interface "$dev" >"$TUNLOG" 2>&1 &
+  tunpid=$!
+  print -r -- "$tunpid" > "$TUNPID"
+  for _ in {1..80}; do
+    /sbin/ifconfig "$iface" >/dev/null 2>&1 && break
+    /bin/kill -0 "$tunpid" >/dev/null 2>&1 || { print -u2 "o motor Full Tunnel encerrou ao iniciar"; down >/dev/null 2>&1 || true; return 10; }
+    /bin/sleep 0.1
+  done
+  /sbin/ifconfig "$iface" >/dev/null 2>&1 || { print -u2 "a interface Full Tunnel não foi criada"; down >/dev/null 2>&1 || true; return 10; }
 
+  /sbin/ifconfig "$iface" inet "$TUN_ADDR" "$TUN_ADDR" up >/dev/null
+  local r
+  for r in "${ROUTES[@]}"; do
+    /sbin/route -q -n add -inet "$r" "$TUN_ADDR" >/dev/null 2>&1 || { print -u2 "não consegui proteger a rota $r"; down >/dev/null 2>&1 || true; return 11; }
+  done
+  /usr/sbin/networksetup -setdnsservers "$svc" 127.0.0.1 >/dev/null || { print -u2 "não consegui proteger o DNS"; down >/dev/null 2>&1 || true; return 12; }
   /usr/bin/killall -HUP mDNSResponder >/dev/null 2>&1 || true
-  print -r -- "connected tor $country $server"
+
+  /bin/sleep 2
+  local verify=""
+  verify="$(verification_lines 2>/dev/null || true)"
+  if ! print -r -- "$verify" | /usr/bin/grep -q '^VERIFIED=1$'; then
+    print -u2 "a verificação completa não passou; o HighGAS desligou para evitar vazamento"
+    print -u2 -- "$verify"
+    down >/dev/null 2>&1 || true
+    return 13
+  fi
+
+  print -r -- "connected fulltor $country $server $iface"
 }
 
 status() {
-  if [[ ! -f "$STATE" ]]; then
-    print -r -- "disconnected"
-    return 0
-  fi
-
-  local pid country server svc proxy enabled pserver pport started
-  pid="$(/bin/cat "$PIDFILE" 2>/dev/null || true)"
-  country="$(state COUNTRY)"
-  server="$(state SERVER)"
-  svc="$(state SERVICE)"
-  started="$(state STARTED_AT)"
-
-  if [[ -z "$pid" || -z "$svc" ]] || ! /bin/kill -0 "$pid" >/dev/null 2>&1; then
+  if [[ ! -f "$STATE" ]]; then print -r -- "disconnected"; return 0; fi
+  local torpid="$(/bin/cat "$PIDFILE" 2>/dev/null || true)" tunpid="$(/bin/cat "$TUNPID" 2>/dev/null || true)" iface="$(state IFACE)" server="$(state SERVER)" country="$(state COUNTRY)" started="$(state STARTED_AT)"
+  if [[ -z "$torpid" || -z "$tunpid" || -z "$iface" ]] || ! /bin/kill -0 "$torpid" >/dev/null 2>&1 || ! /bin/kill -0 "$tunpid" >/dev/null 2>&1 || ! /sbin/ifconfig "$iface" >/dev/null 2>&1; then
     down >/dev/null 2>&1 || true
     print -r -- "disconnected"
     return 0
   fi
-
-  proxy="$(/usr/sbin/networksetup -getsocksfirewallproxy "$svc" 2>/dev/null || true)"
-  enabled="$(proxy_value Enabled "$proxy")"
-  pserver="$(proxy_value Server "$proxy")"
-  pport="$(proxy_value Port "$proxy")"
-
-  if [[ "$enabled" != "Yes" || "$pserver" != "127.0.0.1" || "$pport" != "$SOCKS_PORT" ]]; then
+  if ! verification_lines >/dev/null 2>&1; then
     down >/dev/null 2>&1 || true
     print -r -- "disconnected"
     return 0
   fi
+  print -r -- "connected fulltor $country $server $started $iface"
+}
 
-  print -r -- "connected tor $country $server $started"
+verify() {
+  [[ -f "$STATE" ]] || { print -r -- "VERIFIED=0"; return 1; }
+  verification_lines
 }
 
 recover() {
-  if [[ -f "$STATE" ]]; then
-    down >/dev/null 2>&1 || true
-  else
-    kill_tor || true
-  fi
+  down >/dev/null 2>&1 || true
   print -r -- "recovered"
 }
 
@@ -302,6 +368,7 @@ case "${1:-}" in
   up) [[ $# -eq 2 ]] || exit 64; up "$2" ;;
   down) down ;;
   status) status ;;
+  verify) verify ;;
   recover) recover ;;
-  *) print -u2 "usage: $0 up SERVER|down|status|recover"; exit 64 ;;
+  *) print -u2 "usage: $0 up SERVER|down|status|verify|recover"; exit 64 ;;
 esac
