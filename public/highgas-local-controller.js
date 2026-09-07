@@ -1,5 +1,5 @@
 (() => {
-  const BASE = "http://127.0.0.1:37654";
+  const BASE = "https://127.0.0.1:37654";
   const TOKEN_KEY = "highgas:helper-token";
   const SERVER_KEY = "highgas:selected-server";
   const PHASES = ["idle", "preparing", "waiting", "connected", "attention"];

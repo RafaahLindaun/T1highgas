@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	version  = "0.3.0"
+	version  = "0.4.0"
 	addr     = "127.0.0.1:37654"
 	base     = "/Library/Application Support/HighGAS"
 	profiles = base + "/profiles"
@@ -30,9 +30,11 @@ type app struct {
 	token string
 	mu    sync.Mutex
 }
+
 type serverReq struct {
 	Server string `json:"server"`
 }
+
 type profileReq struct {
 	Server string `json:"server"`
 	Config string `json:"config"`
@@ -42,21 +44,46 @@ func main() {
 	if os.Geteuid() != 0 {
 		panic("HighGAS helper must run as root")
 	}
+
 	tf := base + "/helper.token"
+	certFile := base + "/certs/server.crt"
+	keyFile := base + "/certs/server.key"
+
 	for i := 1; i < len(os.Args); i++ {
-		if os.Args[i] == "--token-file" && i+1 < len(os.Args) {
-			tf = os.Args[i+1]
-			i++
+		switch os.Args[i] {
+		case "--token-file":
+			if i+1 < len(os.Args) {
+				tf = os.Args[i+1]
+				i++
+			}
+		case "--cert-file":
+			if i+1 < len(os.Args) {
+				certFile = os.Args[i+1]
+				i++
+			}
+		case "--key-file":
+			if i+1 < len(os.Args) {
+				keyFile = os.Args[i+1]
+				i++
+			}
 		}
 	}
-	b, e := os.ReadFile(tf)
-	if e != nil {
-		panic(e)
+
+	b, err := os.ReadFile(tf)
+	if err != nil {
+		panic(err)
 	}
 	tok := strings.TrimSpace(string(b))
 	if len(tok) < 32 {
 		panic("invalid helper token")
 	}
+	if _, err := os.Stat(certFile); err != nil {
+		panic("HighGAS TLS certificate is missing")
+	}
+	if _, err := os.Stat(keyFile); err != nil {
+		panic("HighGAS TLS private key is missing")
+	}
+
 	_ = os.MkdirAll(profiles, 0700)
 	a := &app{token: tok}
 	m := http.NewServeMux()
@@ -65,15 +92,31 @@ func main() {
 	m.HandleFunc("/v1/install-profile", a.auth(a.install))
 	m.HandleFunc("/v1/connect", a.auth(a.connect))
 	m.HandleFunc("/v1/disconnect", a.auth(a.disconnect))
-	s := &http.Server{Addr: addr, Handler: a.cors(m), ReadHeaderTimeout: 3 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 15 * time.Second}
-	if e := s.ListenAndServe(); e != nil && !errors.Is(e, http.ErrServerClosed) {
-		panic(e)
+
+	s := &http.Server{
+		Addr:              addr,
+		Handler:           a.cors(m),
+		ReadHeaderTimeout: 3 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       30 * time.Second,
+	}
+
+	if err := s.ListenAndServeTLS(certFile, keyFile); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		panic(err)
 	}
 }
 
 func allowedOrigin(o string) bool {
-	return o == "https://lowgas.vercel.app" || o == "https://t1highgas.vercel.app" || (strings.HasPrefix(o, "https://") && strings.HasSuffix(o, ".vercel.app")) || strings.HasPrefix(o, "http://localhost:") || strings.HasPrefix(o, "http://127.0.0.1:")
+	return o == "https://lowgas.vercel.app" ||
+		o == "https://t1highgas.vercel.app" ||
+		(strings.HasPrefix(o, "https://") && strings.HasSuffix(o, ".vercel.app")) ||
+		strings.HasPrefix(o, "http://localhost:") ||
+		strings.HasPrefix(o, "http://127.0.0.1:") ||
+		strings.HasPrefix(o, "https://localhost:") ||
+		strings.HasPrefix(o, "https://127.0.0.1:")
 }
+
 func (a *app) cors(n http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		o := r.Header.Get("Origin")
@@ -82,18 +125,20 @@ func (a *app) cors(n http.Handler) http.Handler {
 			w.Header().Set("Vary", "Origin")
 			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-HighGAS-Token")
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Private-Network", "true")
 		}
 		if r.Method == http.MethodOptions {
 			if o == "" || !allowedOrigin(o) {
-				http.Error(w, "origin not allowed", 403)
+				http.Error(w, "origin not allowed", http.StatusForbidden)
 				return
 			}
-			w.WriteHeader(204)
+			w.WriteHeader(http.StatusNoContent)
 			return
 		}
 		n.ServeHTTP(w, r)
 	})
 }
+
 func (a *app) auth(n http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		p := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
@@ -101,24 +146,33 @@ func (a *app) auth(n http.HandlerFunc) http.HandlerFunc {
 			p = strings.TrimSpace(r.Header.Get("X-HighGAS-Token"))
 		}
 		if len(p) != len(a.token) || subtle.ConstantTimeCompare([]byte(p), []byte(a.token)) != 1 {
-			out(w, 401, map[string]any{"ok": false, "error": "unauthorized"})
+			out(w, http.StatusUnauthorized, map[string]any{"ok": false, "error": "unauthorized"})
 			return
 		}
 		n(w, r)
 	}
 }
+
 func (a *app) health(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "GET" {
-		out(w, 405, map[string]any{"ok": false})
+	if r.Method != http.MethodGet {
+		out(w, http.StatusMethodNotAllowed, map[string]any{"ok": false})
 		return
 	}
 	_, te := os.Stat(tunnel)
 	_, we := os.Stat(base + "/wireguard-go")
-	out(w, 200, map[string]any{"ok": true, "helper": true, "version": version, "engine": "wireguard-go", "engineReady": te == nil && we == nil})
+	out(w, http.StatusOK, map[string]any{
+		"ok":          true,
+		"helper":      true,
+		"version":     version,
+		"transport":   "https",
+		"engine":      "wireguard-go",
+		"engineReady": te == nil && we == nil,
+	})
 }
+
 func (a *app) status(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "GET" {
-		out(w, 405, map[string]any{"ok": false})
+	if r.Method != http.MethodGet {
+		out(w, http.StatusMethodNotAllowed, map[string]any{"ok": false})
 		return
 	}
 	a.mu.Lock()
@@ -127,80 +181,92 @@ func (a *app) status(w http.ResponseWriter, r *http.Request) {
 	f := strings.Fields(string(b))
 	connected := len(f) >= 3 && f[0] == "connected"
 	ps, _ := profileList()
-	resp := map[string]any{"helper": true, "version": version, "connected": connected, "profiles": ps, "checkedAt": time.Now().UTC().Format(time.RFC3339)}
+	resp := map[string]any{
+		"helper":    true,
+		"version":   version,
+		"transport": "https",
+		"connected": connected,
+		"profiles":  ps,
+		"checkedAt": time.Now().UTC().Format(time.RFC3339),
+	}
 	if connected {
 		resp["activeServer"] = f[1]
 		resp["interface"] = f[2]
 	}
-	out(w, 200, resp)
+	out(w, http.StatusOK, resp)
 }
+
 func (a *app) install(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "POST" {
-		out(w, 405, map[string]any{"ok": false})
+	if r.Method != http.MethodPost {
+		out(w, http.StatusMethodNotAllowed, map[string]any{"ok": false})
 		return
 	}
 	var q profileReq
 	if json.NewDecoder(io.LimitReader(r.Body, 96<<10)).Decode(&q) != nil {
-		out(w, 400, map[string]any{"ok": false, "error": "invalid_request"})
+		out(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid_request"})
 		return
 	}
 	q.Server = strings.ToLower(strings.TrimSpace(q.Server))
 	if !codeRE.MatchString(q.Server) || !validWG(q.Config) {
-		out(w, 400, map[string]any{"ok": false, "error": "invalid_wireguard_config"})
+		out(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid_wireguard_config"})
 		return
 	}
-	if e := os.WriteFile(filepath.Join(profiles, q.Server+".conf"), []byte(strings.TrimSpace(q.Config)+"\n"), 0600); e != nil {
-		out(w, 500, map[string]any{"ok": false, "error": "profile_write_failed"})
+	if err := os.WriteFile(filepath.Join(profiles, q.Server+".conf"), []byte(strings.TrimSpace(q.Config)+"\n"), 0600); err != nil {
+		out(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "profile_write_failed"})
 		return
 	}
-	out(w, 201, map[string]any{"ok": true, "server": q.Server, "state": "installed_locally"})
+	out(w, http.StatusCreated, map[string]any{"ok": true, "server": q.Server, "state": "installed_locally"})
 }
+
 func (a *app) connect(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "POST" {
-		out(w, 405, map[string]any{"ok": false})
+	if r.Method != http.MethodPost {
+		out(w, http.StatusMethodNotAllowed, map[string]any{"ok": false})
 		return
 	}
-	q, e := decodeServer(r)
-	if e != nil {
-		out(w, 400, map[string]any{"ok": false, "error": "invalid_request"})
+	q, err := decodeServer(r)
+	if err != nil {
+		out(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid_request"})
 		return
 	}
-	if _, e = os.Stat(filepath.Join(profiles, q.Server+".conf")); e != nil {
-		out(w, 409, map[string]any{"ok": false, "error": "profile_not_installed", "server": q.Server})
+	if _, err = os.Stat(filepath.Join(profiles, q.Server+".conf")); err != nil {
+		out(w, http.StatusConflict, map[string]any{"ok": false, "error": "profile_not_installed", "server": q.Server})
 		return
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	b, e := exec.Command(tunnel, "up", q.Server).CombinedOutput()
-	if e != nil {
-		out(w, 502, map[string]any{"ok": false, "error": "connect_failed", "detail": strings.TrimSpace(string(b))})
+	b, err := exec.Command(tunnel, "up", q.Server).CombinedOutput()
+	if err != nil {
+		out(w, http.StatusBadGateway, map[string]any{"ok": false, "error": "connect_failed", "detail": strings.TrimSpace(string(b))})
 		return
 	}
-	out(w, 202, map[string]any{"ok": true, "server": q.Server, "state": "connected"})
+	out(w, http.StatusAccepted, map[string]any{"ok": true, "server": q.Server, "state": "connected"})
 }
+
 func (a *app) disconnect(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "POST" {
-		out(w, 405, map[string]any{"ok": false})
+	if r.Method != http.MethodPost {
+		out(w, http.StatusMethodNotAllowed, map[string]any{"ok": false})
 		return
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	b, e := exec.Command(tunnel, "down").CombinedOutput()
-	if e != nil {
-		out(w, 502, map[string]any{"ok": false, "error": "disconnect_failed", "detail": strings.TrimSpace(string(b))})
+	b, err := exec.Command(tunnel, "down").CombinedOutput()
+	if err != nil {
+		out(w, http.StatusBadGateway, map[string]any{"ok": false, "error": "disconnect_failed", "detail": strings.TrimSpace(string(b))})
 		return
 	}
-	out(w, 200, map[string]any{"ok": true, "stopped": 1})
+	out(w, http.StatusOK, map[string]any{"ok": true, "stopped": 1})
 }
+
 func decodeServer(r *http.Request) (serverReq, error) {
 	var q serverReq
-	e := json.NewDecoder(io.LimitReader(r.Body, 8192)).Decode(&q)
+	err := json.NewDecoder(io.LimitReader(r.Body, 8192)).Decode(&q)
 	q.Server = strings.ToLower(strings.TrimSpace(q.Server))
-	if e != nil || !codeRE.MatchString(q.Server) {
+	if err != nil || !codeRE.MatchString(q.Server) {
 		return q, fmt.Errorf("bad server")
 	}
 	return q, nil
 }
+
 func validWG(s string) bool {
 	if len(s) < 40 || len(s) > 64<<10 {
 		return false
@@ -213,10 +279,11 @@ func validWG(s string) bool {
 	}
 	return true
 }
+
 func profileList() ([]string, error) {
-	es, e := os.ReadDir(profiles)
-	if e != nil {
-		return nil, e
+	es, err := os.ReadDir(profiles)
+	if err != nil {
+		return nil, err
 	}
 	var r []string
 	for _, x := range es {
@@ -227,9 +294,10 @@ func profileList() ([]string, error) {
 	}
 	return r, nil
 }
-func out(w http.ResponseWriter, s int, v any) {
+
+func out(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	w.WriteHeader(s)
+	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
 }
