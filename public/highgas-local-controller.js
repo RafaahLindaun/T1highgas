@@ -1,5 +1,6 @@
 (() => {
-  const BASE = "https://127.0.0.1:37654";
+  const LOCAL_HOST = window.location.hostname === "127.0.0.1" || window.location.hostname === "localhost";
+  const BASE = LOCAL_HOST ? window.location.origin : "https://127.0.0.1:37654";
   const TOKEN_KEY = "highgas:helper-token";
   const SERVER_KEY = "highgas:selected-server";
   const PHASES = ["idle", "preparing", "waiting", "connected", "attention"];
@@ -152,7 +153,9 @@
     );
     setText(profileTitle, "Instalar perfil HighGAS");
     setText(profileCopy, "Escolha o .conf uma vez; o HighGAS guarda o perfil somente neste Mac.");
-    setText(note, "HighGAS Local usa WireGuard por baixo e controla a VPN diretamente no macOS, sem Xcode.");
+    setText(note, LOCAL_HOST
+      ? "HighGAS Local ativo: interface e WireGuard estão conectados diretamente neste Mac."
+      : "HighGAS Local usa WireGuard por baixo e controla a VPN diretamente no macOS, sem Xcode.");
   };
 
   const refresh = async () => {
