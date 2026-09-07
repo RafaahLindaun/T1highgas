@@ -93,7 +93,9 @@ else
 fi
 
 sudo /usr/sbin/chown -R root:wheel "$SYSTEM"
-sudo /bin/chmod 700 "$SYSTEM" "$SYSTEM/profiles" "$CERTDIR" "$SYSTEM/highgas-helper" "$SYSTEM/highgas-tunnel" "$SYSTEM/highgas-tor" "$SYSTEM/wireguard-go" "$SYSTEM/tun2socks"
+# A pasta raiz é somente atravessável (não listável) pelo usuário isolado do Tor.
+sudo /bin/chmod 711 "$SYSTEM"
+sudo /bin/chmod 700 "$SYSTEM/profiles" "$CERTDIR" "$SYSTEM/highgas-helper" "$SYSTEM/highgas-tunnel" "$SYSTEM/highgas-tor" "$SYSTEM/wireguard-go" "$SYSTEM/tun2socks"
 sudo /bin/chmod 644 "$SYSTEM/highgas-local-controller.js"
 # Tor inicia como root e cai para _www. Binário/GeoIP não têm segredo e precisam continuar legíveis após a queda de privilégio.
 sudo /usr/bin/find "$SYSTEM/tor-expert" -type d -exec /bin/chmod 755 {} +
@@ -146,9 +148,10 @@ if [[ "$HEALTH" == *'"torReady":true'* && "$HEALTH" == *'"controllerReady":true'
   WEBLOC="$HOME/Desktop/HighGAS.webloc"
   cat > "$WEBLOC" <<EOF_WEBLOC
 <?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0.dtd">
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict><key>URL</key><string>$SITE/</string></dict></plist>
 EOF_WEBLOC
+  /usr/bin/plutil -lint "$WEBLOC" >/dev/null
   echo "Atalho HighGAS criado/atualizado na Mesa."
   echo "Link fixo: $SITE/"
   /usr/bin/open "$SITE/"
