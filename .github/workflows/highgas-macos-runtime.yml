@@ -79,19 +79,19 @@ jobs:
           test -n "$TUN" && chmod +x "$TUN"
           file "$TUN" | grep -Eqi 'x86_64|x86-64' && pass tun2socks-intel
 
-          UTUN=""
-          for n in $(seq 230 249); do
-            if ! /sbin/ifconfig "utun$n" >/dev/null 2>&1; then UTUN="utun$n"; break; fi
-          done
-          test -n "$UTUN" && pass free-utun-found
-
-          sudo "$TUN" -device "$UTUN" -proxy socks5://127.0.0.1:9 -loglevel error >/tmp/t2s.log 2>&1 &
+          NAMEFILE=/tmp/highgas-utun-name
+          rm -f "$NAMEFILE"
+          sudo /usr/bin/env WG_TUN_NAME_FILE="$NAMEFILE" "$TUN" -device utun -proxy socks5://127.0.0.1:9 -loglevel error >/tmp/t2s.log 2>&1 &
           TPID=$!
           trap 'sudo kill "$TPID" >/dev/null 2>&1 || true; [[ -n "${UTUN:-}" ]] && sudo /sbin/route -q -n delete -inet 203.0.113.0/24 -interface "$UTUN" >/dev/null 2>&1 || true' EXIT
           for i in $(seq 1 50); do
-            /sbin/ifconfig "$UTUN" >/dev/null 2>&1 && break
+            test -s "$NAMEFILE" && break
+            kill -0 "$TPID" >/dev/null 2>&1 || { cat /tmp/t2s.log; exit 1; }
             sleep 0.2
           done
+          test -s "$NAMEFILE" && pass kernel-utun-name-file
+          UTUN="$(tr -d '\r\n' < "$NAMEFILE")"
+          [[ "$UTUN" =~ ^utun[0-9]+$ ]] && pass kernel-utun-name-valid
           kill -0 "$TPID" >/dev/null 2>&1 && pass tun2socks-process-live
           /sbin/ifconfig "$UTUN" >/dev/null && pass utun-created
           sudo /sbin/ifconfig "$UTUN" inet 198.18.0.1 198.18.0.1 up
@@ -110,7 +110,7 @@ jobs:
           trap - EXIT
 
           echo "PLATFORM_RUNTIME_TESTS=$C"
-          test "$C" -ge 30
+          test "$C" -ge 31
 
       - name: Run Tor Germany and US egress plus TUN chain checks
         shell: bash
@@ -136,7 +136,7 @@ jobs:
           test -x "$TUN" && pass tun2socks-reused
 
           check_country(){
-            local cc="$1" expected="$2" socks="$3" datadir="/tmp/highgas-tor-test/$cc" pidfile log raw ip country dnsip utun tpid target
+            local cc="$1" expected="$2" socks="$3" datadir="/tmp/highgas-tor-test/$cc" pidfile log raw ip country dnsip utun tpid target namefile
             rm -rf "$datadir" && mkdir -p "$datadir"
             sudo chown -R _www "$datadir"
 
@@ -177,20 +177,19 @@ jobs:
             test -n "$ip" && pass "$cc-egress-ip"
             test "$country" = "$expected" && pass "$cc-country-$expected"
 
-            # End-to-end: uma conexão HTTPS normal é roteada por uma interface
-            # utun e entregue ao Tor pelo tun2socks, sem usar --socks no curl.
             target="$dnsip"
-            utun=""
-            for n in $(seq 230 249); do
-              if ! /sbin/ifconfig "utun$n" >/dev/null 2>&1; then utun="utun$n"; break; fi
-            done
-            test -n "$utun"
-            sudo "$TUN" -device "$utun" -proxy "socks5://127.0.0.1:$socks" -loglevel error >"/tmp/t2s-$cc.log" 2>&1 &
+            namefile="/tmp/highgas-utun-$cc"
+            rm -f "$namefile"
+            sudo /usr/bin/env WG_TUN_NAME_FILE="$namefile" "$TUN" -device utun -proxy "socks5://127.0.0.1:$socks" -loglevel error >"/tmp/t2s-$cc.log" 2>&1 &
             tpid=$!
             for i in $(seq 1 50); do
-              /sbin/ifconfig "$utun" >/dev/null 2>&1 && break
+              test -s "$namefile" && break
+              kill -0 "$tpid" >/dev/null 2>&1 || { cat "/tmp/t2s-$cc.log"; exit 1; }
               sleep 0.2
             done
+            test -s "$namefile" && pass "$cc-utun-name-file"
+            utun="$(tr -d '\r\n' < "$namefile")"
+            [[ "$utun" =~ ^utun[0-9]+$ ]] && pass "$cc-utun-name-valid"
             kill -0 "$tpid" >/dev/null 2>&1 && pass "$cc-tun-process"
             /sbin/ifconfig "$utun" >/dev/null && pass "$cc-utun"
             sudo /sbin/ifconfig "$utun" inet 198.18.0.1 198.18.0.1 up
@@ -215,4 +214,4 @@ jobs:
           check_country de DE 39150
           check_country us US 39151
           echo "TOR_RUNTIME_TESTS=$C"
-          test "$C" -ge 25
+          test "$C" -ge 29
