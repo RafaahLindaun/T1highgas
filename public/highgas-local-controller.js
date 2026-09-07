@@ -4,13 +4,18 @@
   const TOKEN_KEY = "highgas:helper-token";
   const SERVER_KEY = "highgas:selected-server";
   const PHASES = ["idle", "preparing", "waiting", "connected", "attention"];
+  const DEFAULT_TOR_SERVERS = ["de-fra-01", "us-mia-01"];
 
   let token = "";
   let helperAvailable = false;
   let connected = false;
   let activeServer = "";
+  let activeMode = "";
+  let activeCountry = "";
   let connectedAt = 0;
   let lastError = "";
+  let torReady = false;
+  let torServers = [...DEFAULT_TOR_SERVERS];
 
   try {
     const match = window.location.hash.match(/^#highgas-helper=([a-f0-9]{32,})$/i);
@@ -22,6 +27,21 @@
   } catch {
     token = "";
   }
+
+  const selectedServerCode = () => {
+    try {
+      return (localStorage.getItem(SERVER_KEY) || "de-fra-01").toLowerCase();
+    } catch {
+      return "de-fra-01";
+    }
+  };
+
+  const isTorSelection = () => torServers.includes(selectedServerCode());
+  const countryLabel = (server) => {
+    if (server === "de-fra-01") return "Alemanha";
+    if (server === "us-mia-01") return "Estados Unidos";
+    return server || "HighGAS";
+  };
 
   const request = async (path, options = {}) => {
     if (!token) throw new Error("not_paired");
@@ -73,6 +93,35 @@
     return [hours, minutes, seconds].map((value) => String(value).padStart(2, "0")).join(":");
   };
 
+  const findLabeledContainer = (label) => {
+    const wanted = label.toUpperCase();
+    const labels = document.querySelectorAll("small, span, p, div");
+    for (const element of labels) {
+      if (element.childElementCount === 0 && (element.textContent || "").trim().toUpperCase() === wanted) {
+        return element.parentElement;
+      }
+    }
+    return null;
+  };
+
+  const updateLabeledStat = (label, title, copy) => {
+    const box = findLabeledContainer(label);
+    if (!box) return;
+    setText(box.querySelector("strong"), title);
+    setText(box.querySelector("small"), copy);
+  };
+
+  const updateServerCards = () => {
+    document.querySelectorAll(".server-card").forEach((card) => {
+      const name = card.querySelector(".server-copy strong");
+      const copy = card.querySelector(".server-copy small");
+      const value = (name && name.textContent || "").trim();
+      if (value === "Alemanha" || value === "Estados Unidos") {
+        setText(copy, "Rede Tor · gratuito");
+      }
+    });
+  };
+
   const ensureBadge = () => {
     let badge = document.getElementById("highgas-local-badge");
     if (!token) {
@@ -102,14 +151,18 @@
     badge.style.display = "block";
     badge.style.background = helperAvailable ? "rgba(15,52,31,.88)" : "rgba(48,42,20,.9)";
     badge.style.color = helperAvailable ? "#8dffb6" : "#ffd978";
-    setText(badge, helperAvailable ? "HighGAS Local ✓" : "HighGAS Local offline");
+    setText(badge, helperAvailable ? (torReady ? "HighGAS Local + Tor ✓" : "HighGAS Local ✓") : "HighGAS Local offline");
   };
 
   const paint = () => {
     if (!document.body) return;
     ensureBadge();
+    updateServerCards();
     if (!helperAvailable) return;
 
+    const selected = selectedServerCode();
+    const torSelected = isTorSelection() && torReady;
+    const sameActive = connected && activeServer === selected;
     const phase = connected ? "connected" : "idle";
     const powerCard = document.querySelector(".power-card");
     const powerButton = document.querySelector(".power-button");
@@ -130,11 +183,16 @@
 
     if (powerButton) {
       powerButton.disabled = false;
-      powerButton.setAttribute("aria-label", connected ? "DESLIGAR VPN" : "LIGAR VPN");
-      setText(powerButton.querySelector("strong"), connected ? "DESLIGAR VPN" : "LIGAR VPN");
+      const action = sameActive ? "DESLIGAR VPN" : connected ? "TROCAR SAÍDA" : "LIGAR VPN";
+      powerButton.setAttribute("aria-label", action);
+      setText(powerButton.querySelector("strong"), action);
       setText(
         powerButton.querySelector("small"),
-        connected ? `${activeServer || "HighGAS"} · controle local ativo` : "1 toque · controle local automático"
+        connected
+          ? `${countryLabel(activeServer)} · ${activeMode === "tor" ? "Tor ativo" : "controle local ativo"}`
+          : torSelected
+            ? "1 toque · Tor automático"
+            : "1 toque · controle local automático"
       );
     }
 
@@ -143,19 +201,48 @@
       check.classList.toggle("check-icon--ok", connected);
     }
 
-    setText(checkTitle, connected ? "Você está conectado" : "VPN pronta para ligar");
-    setText(
-      checkCopy,
-      lastError ||
-        (connected
+    if (torSelected) {
+      setText(checkTitle, connected ? "Tor ativo" : "Tor pronto para ligar");
+      setText(
+        checkCopy,
+        lastError || (connected
+          ? `Saída ${countryLabel(activeServer)} ativa. Alguns sites podem identificar ou bloquear IPs da rede Tor.`
+          : "A primeira conexão pode levar até cerca de 1 minuto. Não precisa de perfil WireGuard.")
+      );
+      setText(profileTitle, "Tor integrado");
+      setText(profileCopy, "Sem .conf, sem cartão e sem servidor pago.");
+      setText(note, "Modo Tor gratuito: navegação e apps que respeitam o proxy do macOS passam pelo Tor. UDP e apps que ignoram proxy podem usar a conexão normal.");
+      updateLabeledStat("PERFIL", "Tor integrado", "sem arquivo .conf");
+      updateLabeledStat("MONITOR", connected ? "Tor ativo" : "Em espera", connected ? countryLabel(activeServer) : "ativa ao ligar");
+    } else {
+      setText(checkTitle, connected ? "Você está conectado" : "VPN pronta para ligar");
+      setText(
+        checkCopy,
+        lastError || (connected
           ? "O HighGAS controla o túnel WireGuard diretamente e continua ativo em segundo plano."
           : "Toque em Ligar VPN. Não é necessário abrir o aplicativo WireGuard.")
-    );
-    setText(profileTitle, "Instalar perfil HighGAS");
-    setText(profileCopy, "Escolha o .conf uma vez; o HighGAS guarda o perfil somente neste Mac.");
-    setText(note, LOCAL_HOST
-      ? "HighGAS Local ativo: interface e WireGuard estão conectados diretamente neste Mac."
-      : "HighGAS Local usa WireGuard por baixo e controla a VPN diretamente no macOS, sem Xcode.");
+      );
+      setText(profileTitle, "Instalar perfil HighGAS");
+      setText(profileCopy, "Escolha o .conf uma vez; o HighGAS guarda o perfil somente neste Mac.");
+      setText(note, LOCAL_HOST
+        ? "HighGAS Local ativo: interface e WireGuard estão conectados diretamente neste Mac."
+        : "HighGAS Local usa WireGuard por baixo e controla a VPN diretamente no macOS, sem Xcode.");
+    }
+  };
+
+  const refreshNetworkDisplay = async () => {
+    if (!helperAvailable) return;
+    try {
+      const response = await fetch(`${BASE}/api/network-info?ts=${Date.now()}`, {
+        cache: "no-store",
+        headers: { Accept: "application/json" },
+      });
+      if (!response.ok) return;
+      const data = await response.json();
+      updateLabeledStat("IP ATUAL", data.ip || "—", [data.country, data.city].filter(Boolean).join(" · ") || "—");
+    } catch {
+      // O monitor principal continua funcionando mesmo se esta leitura visual falhar.
+    }
   };
 
   const refresh = async () => {
@@ -168,39 +255,64 @@
     try {
       const result = await request("/v1/status", { method: "GET" });
       helperAvailable = true;
-      const wasConnected = connected;
       connected = Boolean(result.connected);
       activeServer = result.activeServer || "";
-      if (connected && !wasConnected) connectedAt = Date.now();
-      if (!connected) connectedAt = 0;
-      if (lastError === "Conexão solicitada. Confirmando o túnel…") lastError = "";
+      activeMode = result.mode || "";
+      activeCountry = result.country || "";
+      torReady = Boolean(result.torReady);
+      if (Array.isArray(result.torServers) && result.torServers.length) {
+        torServers = result.torServers.map((item) => String(item).toLowerCase());
+      }
+      if (connected) {
+        const parsed = result.connectedAt ? new Date(result.connectedAt).getTime() : NaN;
+        if (Number.isFinite(parsed)) connectedAt = parsed;
+        else if (!connectedAt) connectedAt = Date.now();
+      } else {
+        connectedAt = 0;
+      }
+      if (lastError === "Conexão solicitada. Confirmando o túnel…" || lastError === "Tor conectado. Confirmando o IP de saída…") {
+        lastError = "";
+      }
     } catch {
       helperAvailable = false;
     }
 
     paint();
+    if (helperAvailable) void refreshNetworkDisplay();
   };
 
   const connect = async () => {
-    const server = (localStorage.getItem(SERVER_KEY) || "br-sao-01").toLowerCase();
-    lastError = "Conectando…";
+    const server = selectedServerCode();
+    const torSelected = isTorSelection();
+    lastError = torSelected ? "Conectando ao Tor e procurando uma saída no país escolhido…" : "Conectando…";
     paint();
 
     try {
       await request("/v1/connect", {
         method: "POST",
+        timeoutMs: torSelected ? 170000 : 15000,
         body: JSON.stringify({ server }),
       });
-      lastError = "Conexão solicitada. Confirmando o túnel…";
-      window.setTimeout(() => void refresh(), 800);
-      window.setTimeout(() => void refresh(), 2200);
+      lastError = torSelected ? "Tor conectado. Confirmando o IP de saída…" : "Conexão solicitada. Confirmando o túnel…";
+      await refresh();
+      window.setTimeout(() => void refresh(), 1200);
+      window.setTimeout(() => void refresh(), 3500);
     } catch (error) {
-      lastError = error && error.status === 409
-        ? "O perfil deste país ainda não está instalado. Adicione o .conf uma única vez."
-        : "Não consegui acionar o HighGAS Local agora.";
+      const code = error && error.message;
+      const detail = error && error.payload && error.payload.detail;
+      if (code === "tor_not_installed") {
+        lastError = "Esta instalação ainda não possui o motor Tor. Reinstale o pacote HighGAS com Tor.";
+      } else if (code === "tor_timeout") {
+        lastError = "O Tor demorou demais para conectar. Tente Ligar VPN novamente.";
+      } else if (code === "tor_connect_failed") {
+        lastError = detail || "Não consegui criar a saída Tor escolhida agora.";
+      } else if (error && error.status === 409) {
+        lastError = "O perfil deste país ainda não está instalado. Adicione o .conf uma única vez.";
+      } else {
+        lastError = "Não consegui acionar o HighGAS Local agora.";
+      }
+      paint();
     }
-
-    paint();
   };
 
   const disconnect = async () => {
@@ -210,12 +322,17 @@
     try {
       await request("/v1/disconnect", {
         method: "POST",
+        timeoutMs: 15000,
         body: JSON.stringify(activeServer ? { server: activeServer } : {}),
       });
       connected = false;
       activeServer = "";
+      activeMode = "";
+      activeCountry = "";
       connectedAt = 0;
-      lastError = "VPN desligada pelo HighGAS Local.";
+      lastError = "HighGAS desligado e conexão normal restaurada.";
+      await refreshNetworkDisplay();
+      window.setTimeout(() => void refresh(), 500);
     } catch {
       lastError = "Não consegui desligar pelo HighGAS Local agora.";
     }
@@ -225,6 +342,11 @@
 
   const installProfile = async (file) => {
     if (!file || !helperAvailable) return;
+    if (isTorSelection()) {
+      lastError = "O modo Tor já vem integrado e não precisa de arquivo .conf.";
+      paint();
+      return;
+    }
     if (file.size > 64 * 1024) {
       lastError = "Esse arquivo é grande demais para um perfil WireGuard.";
       paint();
@@ -238,7 +360,7 @@
       return;
     }
 
-    const server = (localStorage.getItem(SERVER_KEY) || "br-sao-01").toLowerCase();
+    const server = selectedServerCode();
     lastError = "Salvando o perfil somente neste Mac…";
     paint();
 
@@ -260,12 +382,33 @@
   };
 
   document.addEventListener("click", (event) => {
-    const target = event.target instanceof Element ? event.target.closest(".power-button") : null;
-    if (!target || !helperAvailable || !token) return;
-    event.preventDefault();
-    event.stopPropagation();
-    event.stopImmediatePropagation();
-    void (connected ? disconnect() : connect());
+    const element = event.target instanceof Element ? event.target : null;
+    if (!element || !helperAvailable || !token) return;
+
+    const profile = element.closest(".profile-cta");
+    if (profile && isTorSelection()) {
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation();
+      lastError = "O Tor já está integrado. Não precisa adicionar nenhum perfil.";
+      paint();
+      return;
+    }
+
+    const power = element.closest(".power-button");
+    if (power) {
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation();
+      const selected = selectedServerCode();
+      void (connected && activeServer === selected ? disconnect() : connect());
+      return;
+    }
+
+    if (element.closest(".server-card")) {
+      window.setTimeout(paint, 80);
+      window.setTimeout(() => void refreshNetworkDisplay(), 120);
+    }
   }, true);
 
   document.addEventListener("change", (event) => {

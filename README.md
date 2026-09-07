@@ -1,30 +1,33 @@
-# HighGAS VPN
+# HighGAS
 
-HighGAS é um frontend pessoal, sem login, feito em React + Vite para organizar uma configuração VPN baseada em WireGuard.
+HighGAS é um painel pessoal para macOS com controle local, sem login, sem Xcode e sem assinatura obrigatória.
 
-## O que esta versão faz
+## Modo gratuito atual
 
-- interface responsiva para celular, Mac e PC;
-- seleção de país/servidor;
-- importação local de perfil WireGuard `.conf`;
-- o conteúdo do perfil fica apenas na memória do navegador;
-- diagnóstico de IP/país pela rota `/api/network-info`;
-- catálogo de servidores armazenado em Neon Postgres;
-- rota `/api/servers` como camada entre o frontend e o banco;
-- fallback local para o site continuar utilizável se o catálogo remoto estiver indisponível;
-- sem login e sem dependência do backend antigo do repositório.
+- Alemanha e Estados Unidos usam a rede Tor por meio do Tor Expert Bundle oficial;
+- o usuário escolhe o país e usa o mesmo botão LIGAR/DESLIGAR;
+- não exige cartão, conta em nuvem nem arquivo WireGuard `.conf` para essas duas saídas;
+- o helper fica apenas em `127.0.0.1` e a interface local usa HTTPS;
+- o HighGAS consulta o IP de saída para mostrar no painel o país detectado;
+- ao desligar, o helper restaura as configurações de proxy/DNS que encontrou antes de ligar.
 
-## Limite técnico importante
+### Limite importante do modo Tor
 
-Um navegador não pode criar um túnel VPN de sistema por conta própria. O HighGAS organiza o perfil e verifica a saída, enquanto o túnel real é ativado no aplicativo WireGuard do sistema operacional.
+O modo gratuito configura um proxy SOCKS do macOS e DNS local através do Tor. Navegadores e aplicativos que respeitam o proxy do sistema passam pelo Tor. Tráfego UDP e aplicativos que ignoram o proxy do macOS podem continuar usando a conexão normal. Portanto, esse modo não deve ser descrito como um túnel VPN WireGuard completo.
 
-## Neon
+Alguns sites também podem identificar ou bloquear IPs públicos da rede Tor, e a velocidade costuma ser menor que a de um servidor WireGuard dedicado.
 
-O backend oficial é o projeto Neon `HighGAS`, PostgreSQL 17 na região `aws-sa-east-1`.
+## WireGuard próprio
 
-A tabela `highgas_servers` guarda somente metadados públicos do catálogo: país, cidade, protocolo, status e ordenação. Perfis `.conf`, chaves privadas e senhas nunca devem ser armazenados nessa tabela.
+O motor `wireguard-go` continua incluído no HighGAS para uso futuro com servidores próprios. Perfis `.conf` ficam somente no Mac, em diretório protegido, e chaves privadas não são enviadas para GitHub, Vercel ou banco de dados.
 
-A aplicação possui um catálogo local de fallback para continuar abrindo caso o backend esteja temporariamente indisponível.
+## Arquitetura
+
+- React + Vite no frontend;
+- helper Go local no macOS;
+- interface local em `https://127.0.0.1:37654`;
+- Tor Expert Bundle oficial como transporte gratuito opcional;
+- `wireguard-go` para túneis próprios quando existirem endpoints WireGuard reais.
 
 ## Desenvolvimento
 
@@ -38,5 +41,3 @@ npm run dev
 ```bash
 npm run build
 ```
-
-O frontend foi mantido propositalmente pequeno para reduzir pontos de falha.

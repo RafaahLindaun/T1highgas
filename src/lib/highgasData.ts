@@ -4,7 +4,7 @@ export type VpnServer = {
   country_code: string;
   country_name: string;
   city: string;
-  protocol: "wireguard" | "openvpn";
+  protocol: "wireguard" | "openvpn" | "tor";
   status: "online" | "maintenance" | "offline";
   is_recommended: boolean;
   sort_order: number;
@@ -15,11 +15,11 @@ export type CatalogSource = "neon" | "fallback";
 export const fallbackServers: VpnServer[] = [
   {
     id: 1,
-    code: "br-sao-01",
-    country_code: "BR",
-    country_name: "Brasil",
-    city: "São Paulo",
-    protocol: "wireguard",
+    code: "de-fra-01",
+    country_code: "DE",
+    country_name: "Alemanha",
+    city: "Rede Tor",
+    protocol: "tor",
     status: "online",
     is_recommended: true,
     sort_order: 10,
@@ -29,44 +29,11 @@ export const fallbackServers: VpnServer[] = [
     code: "us-mia-01",
     country_code: "US",
     country_name: "Estados Unidos",
-    city: "Miami",
-    protocol: "wireguard",
+    city: "Rede Tor",
+    protocol: "tor",
     status: "online",
     is_recommended: false,
     sort_order: 20,
-  },
-  {
-    id: 3,
-    code: "nl-ams-01",
-    country_code: "NL",
-    country_name: "Países Baixos",
-    city: "Amsterdam",
-    protocol: "wireguard",
-    status: "online",
-    is_recommended: false,
-    sort_order: 30,
-  },
-  {
-    id: 4,
-    code: "de-fra-01",
-    country_code: "DE",
-    country_name: "Alemanha",
-    city: "Frankfurt",
-    protocol: "wireguard",
-    status: "online",
-    is_recommended: false,
-    sort_order: 40,
-  },
-  {
-    id: 5,
-    code: "gb-lon-01",
-    country_code: "GB",
-    country_name: "Reino Unido",
-    city: "Londres",
-    protocol: "wireguard",
-    status: "online",
-    is_recommended: false,
-    sort_order: 50,
   },
 ];
 

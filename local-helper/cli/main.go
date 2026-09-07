@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -13,17 +14,20 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
 const (
-	version  = "0.5.0"
+	version  = "0.6.0"
 	addr     = "127.0.0.1:37654"
 	base     = "/Library/Application Support/HighGAS"
 	profiles = base + "/profiles"
 	tunnel   = base + "/highgas-tunnel"
+	torctl   = base + "/highgas-tor"
+	torBin   = base + "/tor-expert/tor/tor"
 	siteURL  = "https://lowgas.vercel.app"
 )
 
@@ -87,6 +91,13 @@ func main() {
 		panic("HighGAS TLS private key is missing")
 	}
 
+	// A reinicialização do helper nunca pode deixar um proxy local apontando para
+	// um processo Tor que não existe mais. Em cada start restauramos a rede para
+	// o estado normal; o usuário liga o modo Tor novamente pelo botão.
+	if _, err := os.Stat(torctl); err == nil {
+		_ = exec.Command(torctl, "recover").Run()
+	}
+
 	target, err := url.Parse(siteURL)
 	if err != nil {
 		panic(err)
@@ -116,6 +127,7 @@ func main() {
 	_ = os.MkdirAll(profiles, 0700)
 	a := &app{token: tok}
 	m := http.NewServeMux()
+	m.HandleFunc("/api/network-info", a.networkInfo)
 	m.HandleFunc("/v1/health", a.health)
 	m.HandleFunc("/v1/status", a.auth(a.status))
 	m.HandleFunc("/v1/install-profile", a.auth(a.install))
@@ -127,9 +139,9 @@ func main() {
 		Addr:              addr,
 		Handler:           a.cors(m),
 		ReadHeaderTimeout: 3 * time.Second,
-		ReadTimeout:       15 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       45 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      180 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 
 	if err := s.ListenAndServeTLS(certFile, keyFile); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -183,6 +195,50 @@ func (a *app) auth(n http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+func torAvailable() bool {
+	if info, err := os.Stat(torctl); err != nil || info.IsDir() || info.Mode()&0111 == 0 {
+		return false
+	}
+	if info, err := os.Stat(torBin); err != nil || info.IsDir() || info.Mode()&0111 == 0 {
+		return false
+	}
+	return true
+}
+
+func torCountryForServer(server string) (string, bool) {
+	switch server {
+	case "de-fra-01":
+		return "DE", true
+	case "us-mia-01":
+		return "US", true
+	default:
+		return "", false
+	}
+}
+
+func readTorStatus() (connected bool, country, server, startedAt string) {
+	if !torAvailable() {
+		return false, "", "", ""
+	}
+	b, err := exec.Command(torctl, "status").CombinedOutput()
+	if err != nil {
+		return false, "", "", ""
+	}
+	f := strings.Fields(string(b))
+	if len(f) >= 5 && f[0] == "connected" && f[1] == "tor" {
+		return true, strings.ToUpper(f[2]), f[3], f[4]
+	}
+	return false, "", "", ""
+}
+
+func startedISO(epoch string) string {
+	value, err := strconv.ParseInt(epoch, 10, 64)
+	if err != nil || value <= 0 {
+		return ""
+	}
+	return time.Unix(value, 0).UTC().Format(time.RFC3339)
+}
+
 func (a *app) health(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		out(w, http.StatusMethodNotAllowed, map[string]any{"ok": false})
@@ -195,8 +251,9 @@ func (a *app) health(w http.ResponseWriter, r *http.Request) {
 		"helper":      true,
 		"version":     version,
 		"transport":   "https-local-ui",
-		"engine":      "wireguard-go",
+		"engine":      "wireguard-go+tor",
 		"engineReady": te == nil && we == nil,
+		"torReady":    torAvailable(),
 	})
 }
 
@@ -205,21 +262,39 @@ func (a *app) status(w http.ResponseWriter, r *http.Request) {
 		out(w, http.StatusMethodNotAllowed, map[string]any{"ok": false})
 		return
 	}
+
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	b, _ := exec.Command(tunnel, "status").CombinedOutput()
-	f := strings.Fields(string(b))
-	connected := len(f) >= 3 && f[0] == "connected"
+
 	ps, _ := profileList()
 	resp := map[string]any{
-		"helper":    true,
-		"version":   version,
-		"transport": "https-local-ui",
-		"connected": connected,
-		"profiles":  ps,
-		"checkedAt": time.Now().UTC().Format(time.RFC3339),
+		"helper":     true,
+		"version":    version,
+		"transport":  "https-local-ui",
+		"connected":  false,
+		"profiles":   ps,
+		"torReady":   torAvailable(),
+		"torServers": []string{"de-fra-01", "us-mia-01"},
+		"checkedAt":  time.Now().UTC().Format(time.RFC3339),
 	}
-	if connected {
+
+	if connected, country, server, started := readTorStatus(); connected {
+		resp["connected"] = true
+		resp["mode"] = "tor"
+		resp["country"] = country
+		resp["activeServer"] = server
+		if iso := startedISO(started); iso != "" {
+			resp["connectedAt"] = iso
+		}
+		out(w, http.StatusOK, resp)
+		return
+	}
+
+	b, _ := exec.Command(tunnel, "status").CombinedOutput()
+	f := strings.Fields(string(b))
+	if len(f) >= 3 && f[0] == "connected" {
+		resp["connected"] = true
+		resp["mode"] = "wireguard"
 		resp["activeServer"] = f[1]
 		resp["interface"] = f[2]
 	}
@@ -258,18 +333,46 @@ func (a *app) connect(w http.ResponseWriter, r *http.Request) {
 		out(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid_request"})
 		return
 	}
+
+	if _, ok := torCountryForServer(q.Server); ok {
+		if !torAvailable() {
+			out(w, http.StatusConflict, map[string]any{"ok": false, "error": "tor_not_installed"})
+			return
+		}
+
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		_ = exec.Command(tunnel, "down").Run()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 165*time.Second)
+		defer cancel()
+		b, err := exec.CommandContext(ctx, torctl, "up", q.Server).CombinedOutput()
+		if ctx.Err() != nil {
+			_ = exec.Command(torctl, "down").Run()
+			out(w, http.StatusGatewayTimeout, map[string]any{"ok": false, "error": "tor_timeout", "detail": "Tor demorou demais para estabelecer a saída escolhida"})
+			return
+		}
+		if err != nil {
+			out(w, http.StatusBadGateway, map[string]any{"ok": false, "error": "tor_connect_failed", "detail": strings.TrimSpace(string(b))})
+			return
+		}
+		out(w, http.StatusAccepted, map[string]any{"ok": true, "server": q.Server, "mode": "tor", "state": "connected"})
+		return
+	}
+
 	if _, err = os.Stat(filepath.Join(profiles, q.Server+".conf")); err != nil {
 		out(w, http.StatusConflict, map[string]any{"ok": false, "error": "profile_not_installed", "server": q.Server})
 		return
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	_ = exec.Command(torctl, "down").Run()
 	b, err := exec.Command(tunnel, "up", q.Server).CombinedOutput()
 	if err != nil {
 		out(w, http.StatusBadGateway, map[string]any{"ok": false, "error": "connect_failed", "detail": strings.TrimSpace(string(b))})
 		return
 	}
-	out(w, http.StatusAccepted, map[string]any{"ok": true, "server": q.Server, "state": "connected"})
+	out(w, http.StatusAccepted, map[string]any{"ok": true, "server": q.Server, "mode": "wireguard", "state": "connected"})
 }
 
 func (a *app) disconnect(w http.ResponseWriter, r *http.Request) {
@@ -277,14 +380,81 @@ func (a *app) disconnect(w http.ResponseWriter, r *http.Request) {
 		out(w, http.StatusMethodNotAllowed, map[string]any{"ok": false})
 		return
 	}
+
 	a.mu.Lock()
 	defer a.mu.Unlock()
+
+	var details []string
+	stopped := 0
+	if torAvailable() {
+		b, err := exec.Command(torctl, "down").CombinedOutput()
+		if err != nil {
+			details = append(details, strings.TrimSpace(string(b)))
+		} else {
+			stopped++
+		}
+	}
 	b, err := exec.Command(tunnel, "down").CombinedOutput()
 	if err != nil {
-		out(w, http.StatusBadGateway, map[string]any{"ok": false, "error": "disconnect_failed", "detail": strings.TrimSpace(string(b))})
+		details = append(details, strings.TrimSpace(string(b)))
+	} else {
+		stopped++
+	}
+	if len(details) > 0 && stopped == 0 {
+		out(w, http.StatusBadGateway, map[string]any{"ok": false, "error": "disconnect_failed", "detail": strings.Join(details, "; ")})
 		return
 	}
-	out(w, http.StatusOK, map[string]any{"ok": true, "stopped": 1})
+	out(w, http.StatusOK, map[string]any{"ok": true, "stopped": stopped})
+}
+
+func (a *app) networkInfo(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		out(w, http.StatusMethodNotAllowed, map[string]any{"error": "method_not_allowed"})
+		return
+	}
+
+	target := siteURL + "/api/network-info"
+	if r.URL.RawQuery != "" {
+		target += "?" + r.URL.RawQuery
+	}
+
+	a.mu.Lock()
+	torConnected, _, _, _ := readTorStatus()
+	a.mu.Unlock()
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+
+	if torConnected {
+		ctx, cancel := context.WithTimeout(r.Context(), 18*time.Second)
+		defer cancel()
+		b, err := exec.CommandContext(ctx, "/usr/bin/curl", "-fsS", "--max-time", "15", "--socks5-hostname", "127.0.0.1:39050", "-H", "Accept: application/json", target).CombinedOutput()
+		if err != nil {
+			out(w, http.StatusBadGateway, map[string]any{"error": "tor_network_check_failed"})
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(b)
+		return
+	}
+
+	transport := &http.Transport{Proxy: nil}
+	client := &http.Client{Timeout: 12 * time.Second, Transport: transport}
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, target, nil)
+	if err != nil {
+		out(w, http.StatusInternalServerError, map[string]any{"error": "network_request_failed"})
+		return
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "HighGAS-Local/"+version)
+	resp, err := client.Do(req)
+	if err != nil {
+		out(w, http.StatusBadGateway, map[string]any{"error": "network_check_failed"})
+		return
+	}
+	defer resp.Body.Close()
+	w.WriteHeader(resp.StatusCode)
+	_, _ = io.Copy(w, io.LimitReader(resp.Body, 64<<10))
 }
 
 func decodeServer(r *http.Request) (serverReq, error) {

@@ -12,13 +12,15 @@ CAKEY="$CERTDIR/highgas-local-ca.key"
 SERVERCERT="$CERTDIR/server.crt"
 SERVERKEY="$CERTDIR/server.key"
 
-for f in highgas-helper highgas-tunnel wireguard-go; do
+for f in highgas-helper highgas-tunnel highgas-tor wireguard-go; do
   [[ -f "$ROOT/$f" ]] || { echo "Pacote incompleto: $f"; read -k 1 '?Fechar'; exit 1; }
 done
+[[ -x "$ROOT/tor-expert/tor/tor" ]] || { echo "Pacote incompleto: motor Tor"; read -k 1 '?Fechar'; exit 1; }
+[[ -f "$ROOT/tor-expert/data/geoip" && -f "$ROOT/tor-expert/data/geoip6" ]] || { echo "Pacote incompleto: dados GeoIP do Tor"; read -k 1 '?Fechar'; exit 1; }
 
 /usr/bin/xattr -dr com.apple.quarantine "$ROOT" >/dev/null 2>&1 || true
 
-echo "O HighGAS precisa da senha administrativa uma única vez para instalar o motor WireGuard e a interface local segura."
+echo "O HighGAS precisa da senha administrativa uma única vez para instalar WireGuard, Tor e a interface local segura."
 sudo -v
 
 /bin/launchctl bootout "gui/$UID/app.highgas.helper" >/dev/null 2>&1 || true
@@ -26,9 +28,11 @@ rm -f "$HOME/Library/LaunchAgents/app.highgas.helper.plist" >/dev/null 2>&1 || t
 sudo /bin/launchctl bootout system/app.highgas.helper >/dev/null 2>&1 || true
 
 sudo /bin/mkdir -p "$SYSTEM/profiles" "$CERTDIR" /var/run/highgas /var/run/wireguard
-for f in highgas-helper highgas-tunnel wireguard-go; do
+for f in highgas-helper highgas-tunnel highgas-tor wireguard-go; do
   sudo /bin/cp "$ROOT/$f" "$SYSTEM/$f"
 done
+sudo /bin/rm -rf "$SYSTEM/tor-expert"
+sudo /bin/cp -R "$ROOT/tor-expert" "$SYSTEM/tor-expert"
 
 if [[ ! -s "$CACERT" || ! -s "$CAKEY" || ! -s "$SERVERCERT" || ! -s "$SERVERKEY" ]]; then
   echo "Criando certificado local seguro do HighGAS..."
@@ -69,7 +73,6 @@ EOF_EXT
 fi
 
 # A CA existe apenas neste Mac e só assina o endereço loopback do HighGAS.
-# Reinstalamos explicitamente a confiança para evitar estados inconsistentes do Chaveiro/Safari.
 sudo /usr/bin/security delete-certificate -c "HighGAS Local Root CA" /Library/Keychains/System.keychain >/dev/null 2>&1 || true
 if sudo /usr/bin/security add-trusted-cert -d -r trustRoot \
   -k /Library/Keychains/System.keychain "$CACERT" >/dev/null 2>&1; then
@@ -79,7 +82,9 @@ else
 fi
 
 sudo /usr/sbin/chown -R root:wheel "$SYSTEM"
-sudo /bin/chmod 700 "$SYSTEM" "$SYSTEM/profiles" "$CERTDIR" "$SYSTEM/highgas-helper" "$SYSTEM/highgas-tunnel" "$SYSTEM/wireguard-go"
+sudo /bin/chmod 700 "$SYSTEM" "$SYSTEM/profiles" "$CERTDIR" "$SYSTEM/highgas-helper" "$SYSTEM/highgas-tunnel" "$SYSTEM/highgas-tor" "$SYSTEM/wireguard-go"
+sudo /bin/chmod -R u+rwX,go-rwx "$SYSTEM/tor-expert"
+sudo /bin/chmod 700 "$SYSTEM/tor-expert/tor/tor"
 sudo /bin/chmod 600 "$CAKEY" "$SERVERKEY"
 sudo /bin/chmod 644 "$CACERT" "$SERVERCERT"
 
@@ -123,15 +128,14 @@ sudo /bin/launchctl enable system/app.highgas.helper >/dev/null 2>&1 || true
 sudo /bin/launchctl kickstart -k system/app.highgas.helper
 sleep 1
 
-# O teste roda como root porque os arquivos de certificado ficam intencionalmente protegidos.
 if sudo /usr/bin/curl -fsS --max-time 5 --cacert "$CACERT" https://127.0.0.1:37654/v1/health >/dev/null; then
-  echo "HighGAS Local seguro e WireGuard ativos."
+  echo "HighGAS Local seguro: WireGuard + Tor instalados."
   /usr/bin/open "$SITE/?highgas-local=1#highgas-helper=$T"
 else
   echo "O serviço não respondeu. Log: $SYSTEM/helper-error.log"
   echo "Não vou abrir o HighGAS até o helper local estar saudável."
 fi
 
-echo "Pronto: sem Xcode. A interface HighGAS agora abre pelo próprio serviço local seguro."
+echo "Pronto: sem Xcode e sem assinatura. Alemanha/EUA podem usar o modo Tor gratuito."
 read -k 1 '?Pressione qualquer tecla para fechar.'
 echo
