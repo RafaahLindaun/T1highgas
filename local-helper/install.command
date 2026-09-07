@@ -15,6 +15,7 @@ SERVERKEY="$CERTDIR/server.key"
 for f in highgas-helper highgas-tunnel highgas-tor wireguard-go; do
   [[ -f "$ROOT/$f" ]] || { echo "Pacote incompleto: $f"; read -k 1 '?Fechar'; exit 1; }
 done
+[[ -f "$ROOT/highgas-local-controller.js" ]] || { echo "Pacote incompleto: controlador local"; read -k 1 '?Fechar'; exit 1; }
 [[ -x "$ROOT/tor-expert/tor/tor" ]] || { echo "Pacote incompleto: motor Tor"; read -k 1 '?Fechar'; exit 1; }
 [[ -f "$ROOT/tor-expert/data/geoip" && -f "$ROOT/tor-expert/data/geoip6" ]] || { echo "Pacote incompleto: dados GeoIP do Tor"; read -k 1 '?Fechar'; exit 1; }
 
@@ -31,6 +32,7 @@ sudo /bin/mkdir -p "$SYSTEM/profiles" "$CERTDIR" /var/run/highgas /var/run/wireg
 for f in highgas-helper highgas-tunnel highgas-tor wireguard-go; do
   sudo /bin/cp "$ROOT/$f" "$SYSTEM/$f"
 done
+sudo /bin/cp "$ROOT/highgas-local-controller.js" "$SYSTEM/highgas-local-controller.js"
 sudo /bin/rm -rf "$SYSTEM/tor-expert"
 sudo /bin/cp -R "$ROOT/tor-expert" "$SYSTEM/tor-expert"
 
@@ -72,7 +74,6 @@ EOF_EXT
   /bin/rm -f "$CACFG" "$EXTCFG" "$CSR"
 fi
 
-# A CA existe apenas neste Mac e só assina o endereço loopback do HighGAS.
 sudo /usr/bin/security delete-certificate -c "HighGAS Local Root CA" /Library/Keychains/System.keychain >/dev/null 2>&1 || true
 if sudo /usr/bin/security add-trusted-cert -d -r trustRoot \
   -k /Library/Keychains/System.keychain "$CACERT" >/dev/null 2>&1; then
@@ -83,6 +84,7 @@ fi
 
 sudo /usr/sbin/chown -R root:wheel "$SYSTEM"
 sudo /bin/chmod 700 "$SYSTEM" "$SYSTEM/profiles" "$CERTDIR" "$SYSTEM/highgas-helper" "$SYSTEM/highgas-tunnel" "$SYSTEM/highgas-tor" "$SYSTEM/wireguard-go"
+sudo /bin/chmod 644 "$SYSTEM/highgas-local-controller.js"
 sudo /bin/chmod -R u+rwX,go-rwx "$SYSTEM/tor-expert"
 sudo /bin/chmod 700 "$SYSTEM/tor-expert/tor/tor"
 sudo /bin/chmod 600 "$CAKEY" "$SERVERKEY"
@@ -128,14 +130,15 @@ sudo /bin/launchctl enable system/app.highgas.helper >/dev/null 2>&1 || true
 sudo /bin/launchctl kickstart -k system/app.highgas.helper
 sleep 1
 
-if sudo /usr/bin/curl -fsS --max-time 5 --cacert "$CACERT" https://127.0.0.1:37654/v1/health >/dev/null; then
-  echo "HighGAS Local seguro: WireGuard + Tor instalados."
+HEALTH="$(sudo /usr/bin/curl -fsS --max-time 5 --cacert "$CACERT" https://127.0.0.1:37654/v1/health 2>/dev/null || true)"
+if [[ "$HEALTH" == *'"torReady":true'* && "$HEALTH" == *'"controllerReady":true'* ]]; then
+  echo "HighGAS Local seguro: WireGuard + Tor + controlador local instalados."
   /usr/bin/open "$SITE/?highgas-local=1#highgas-helper=$T"
 else
-  echo "O serviço não respondeu. Log: $SYSTEM/helper-error.log"
-  echo "Não vou abrir o HighGAS até o helper local estar saudável."
+  echo "O serviço não passou na verificação final. Log: $SYSTEM/helper-error.log"
+  echo "Não vou abrir o HighGAS até Tor e controlador local estarem saudáveis."
 fi
 
-echo "Pronto: sem Xcode e sem assinatura. Alemanha/EUA podem usar o modo Tor gratuito."
+echo "Pronto: sem Xcode e sem assinatura. Alemanha/EUA usam o modo Tor gratuito."
 read -k 1 '?Pressione qualquer tecla para fechar.'
 echo
