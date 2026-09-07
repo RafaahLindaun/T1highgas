@@ -8,9 +8,7 @@ on:
       - ".github/workflows/highgas-local-helper.yml"
   push:
     branches:
-      - highgas-wireguard-cli
-      - highgas-tor-free
-      - highgas-tor-local-assets
+      - highgas-direct-local-v2
     paths:
       - "local-helper/**"
       - "public/highgas-local-controller.js"
@@ -34,8 +32,8 @@ jobs:
       - name: Validate helper
         working-directory: local-helper
         run: |
-          go vet ./cli
-          go test ./cli
+          go vet ./direct
+          go test ./direct
 
       - name: Validate zsh scripts
         run: |
@@ -53,29 +51,24 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p /tmp/tor-expert/intel /tmp/tor-expert/apple-silicon
-
           curl --fail --location --retry 3 --retry-delay 2 \
             "https://archive.torproject.org/tor-package-archive/torbrowser/${TOR_EXPERT_VERSION}/tor-expert-bundle-macos-x86_64-${TOR_EXPERT_VERSION}.tar.gz" \
             -o /tmp/tor-intel.tar.gz
           curl --fail --location --retry 3 --retry-delay 2 \
             "https://archive.torproject.org/tor-package-archive/torbrowser/${TOR_EXPERT_VERSION}/tor-expert-bundle-macos-aarch64-${TOR_EXPERT_VERSION}.tar.gz" \
             -o /tmp/tor-apple-silicon.tar.gz
-
           tar -xzf /tmp/tor-intel.tar.gz -C /tmp/tor-expert/intel
           tar -xzf /tmp/tor-apple-silicon.tar.gz -C /tmp/tor-expert/apple-silicon
-
           test -x /tmp/tor-expert/intel/tor/tor
           test -f /tmp/tor-expert/intel/data/geoip
           test -f /tmp/tor-expert/intel/data/geoip6
           test -x /tmp/tor-expert/apple-silicon/tor/tor
           test -f /tmp/tor-expert/apple-silicon/data/geoip
           test -f /tmp/tor-expert/apple-silicon/data/geoip6
-
           file /tmp/tor-expert/intel/tor/tor | tee /tmp/tor-intel-file.txt
           file /tmp/tor-expert/apple-silicon/tor/tor | tee /tmp/tor-arm-file.txt
           grep -Eqi 'x86_64|x86-64' /tmp/tor-intel-file.txt
           grep -Eqi 'arm64|aarch64' /tmp/tor-arm-file.txt
-          sha256sum /tmp/tor-intel.tar.gz /tmp/tor-apple-silicon.tar.gz
 
       - name: Build macOS packages
         shell: bash
@@ -86,7 +79,7 @@ jobs:
             set -- $spec
             out="$1"
             arch="$2"
-            (cd local-helper && CGO_ENABLED=0 GOOS=darwin GOARCH="$arch" go build -trimpath -ldflags='-s -w' -o "dist/$out/highgas-helper" ./cli)
+            (cd local-helper && CGO_ENABLED=0 GOOS=darwin GOARCH="$arch" go build -trimpath -ldflags='-s -w' -o "dist/$out/highgas-helper" ./direct)
             (cd /tmp/wireguard-go && CGO_ENABLED=0 GOOS=darwin GOARCH="$arch" go build -trimpath -ldflags='-s -w' -o "$GITHUB_WORKSPACE/local-helper/dist/$out/wireguard-go" .)
             cp local-helper/highgas-tunnel local-helper/highgas-tor local-helper/install.command local-helper/uninstall.command local-helper/TOR-NOTICE.txt public/highgas-local-controller.js "local-helper/dist/$out/"
             mkdir -p "local-helper/dist/$out/tor-expert"
@@ -99,9 +92,9 @@ jobs:
         run: |
           grep -q '^#!/bin/zsh' local-helper/highgas-tunnel
           grep -q '^#!/bin/zsh' local-helper/highgas-tor
-          grep -q 'tor-expert' local-helper/install.command
-          grep -q 'highgas-tor' local-helper/install.command
-          grep -q 'DEFAULT_TOR_SERVERS' local-helper/dist/intel/highgas-local-controller.js
+          grep -q 'HighGAS.webloc' local-helper/install.command
+          grep -q 'LOCAL_HOST' local-helper/dist/intel/highgas-local-controller.js
+          grep -q 'credentials: "same-origin"' local-helper/dist/intel/highgas-local-controller.js
           test -x local-helper/dist/intel/tor-expert/tor/tor
           test -f local-helper/dist/intel/tor-expert/data/geoip
           test -x local-helper/dist/apple-silicon/tor-expert/tor/tor
@@ -109,12 +102,12 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: HighGAS-Tor-WireGuard-macOS-Intel
+          name: HighGAS-Direct-Tor-macOS-Intel
           path: local-helper/dist/intel/
           if-no-files-found: error
 
       - uses: actions/upload-artifact@v4
         with:
-          name: HighGAS-Tor-WireGuard-macOS-Apple-Silicon
+          name: HighGAS-Direct-Tor-macOS-Apple-Silicon
           path: local-helper/dist/apple-silicon/
           if-no-files-found: error
