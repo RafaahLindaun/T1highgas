@@ -6,7 +6,7 @@ SYSTEM="/Library/Application Support/HighGAS"
 CERTDIR="$SYSTEM/certs"
 TOKEN="$SYSTEM/helper.token"
 PLIST="/Library/LaunchDaemons/app.highgas.helper.plist"
-SITE="https://lowgas.vercel.app"
+SITE="https://127.0.0.1:37654"
 CACERT="$CERTDIR/highgas-local-ca.crt"
 CAKEY="$CERTDIR/highgas-local-ca.key"
 SERVERCERT="$CERTDIR/server.crt"
@@ -18,7 +18,7 @@ done
 
 /usr/bin/xattr -dr com.apple.quarantine "$ROOT" >/dev/null 2>&1 || true
 
-echo "O HighGAS precisa da senha administrativa uma única vez para instalar o motor WireGuard e a conexão local segura."
+echo "O HighGAS precisa da senha administrativa uma única vez para instalar o motor WireGuard e a interface local segura."
 sudo -v
 
 /bin/launchctl bootout "gui/$UID/app.highgas.helper" >/dev/null 2>&1 || true
@@ -68,10 +68,15 @@ EOF_EXT
   /bin/rm -f "$CACFG" "$EXTCFG" "$CSR"
 fi
 
-# Safari/WebKit não permite que uma página HTTPS converse com um helper HTTP local.
-# A CA abaixo é criada neste Mac e serve exclusivamente ao endereço loopback do HighGAS.
-sudo /usr/bin/security add-trusted-cert -d -r trustRoot \
-  -k /Library/Keychains/System.keychain "$CACERT" >/dev/null 2>&1 || true
+# A CA existe apenas neste Mac e só assina o endereço loopback do HighGAS.
+# Reinstalamos explicitamente a confiança para evitar estados inconsistentes do Chaveiro/Safari.
+sudo /usr/bin/security delete-certificate -c "HighGAS Local Root CA" /Library/Keychains/System.keychain >/dev/null 2>&1 || true
+if sudo /usr/bin/security add-trusted-cert -d -r trustRoot \
+  -k /Library/Keychains/System.keychain "$CACERT" >/dev/null 2>&1; then
+  echo "Certificado local confiável instalado."
+else
+  echo "Aviso: não consegui registrar automaticamente a confiança do certificado local."
+fi
 
 sudo /usr/sbin/chown -R root:wheel "$SYSTEM"
 sudo /bin/chmod 700 "$SYSTEM" "$SYSTEM/profiles" "$CERTDIR" "$SYSTEM/highgas-helper" "$SYSTEM/highgas-tunnel" "$SYSTEM/wireguard-go"
@@ -118,13 +123,15 @@ sudo /bin/launchctl enable system/app.highgas.helper >/dev/null 2>&1 || true
 sudo /bin/launchctl kickstart -k system/app.highgas.helper
 sleep 1
 
-if /usr/bin/curl -fsS --max-time 4 --cacert "$CACERT" https://127.0.0.1:37654/v1/health >/dev/null; then
-  echo "HighGAS WireGuard HTTPS ativo."
+# O teste roda como root porque os arquivos de certificado ficam intencionalmente protegidos.
+if sudo /usr/bin/curl -fsS --max-time 5 --cacert "$CACERT" https://127.0.0.1:37654/v1/health >/dev/null; then
+  echo "HighGAS Local seguro e WireGuard ativos."
+  /usr/bin/open "$SITE/?highgas-local=1#highgas-helper=$T"
 else
-  echo "Serviço instalado; verifique $SYSTEM/helper-error.log se não abrir."
+  echo "O serviço não respondeu. Log: $SYSTEM/helper-error.log"
+  echo "Não vou abrir o HighGAS até o helper local estar saudável."
 fi
 
-/usr/bin/open "$SITE/#highgas-helper=$T"
-echo "Pronto: sem Xcode. O Safari agora conversa com o HighGAS por HTTPS local e o botão liga/desliga o túnel."
+echo "Pronto: sem Xcode. A interface HighGAS agora abre pelo próprio serviço local seguro."
 read -k 1 '?Pressione qualquer tecla para fechar.'
 echo
