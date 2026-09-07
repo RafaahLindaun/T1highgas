@@ -1,0 +1,72 @@
+name: HighGAS macOS Runtime
+
+on:
+  push:
+    branches:
+      - highgas-full-tunnel-v1
+    paths:
+      - "local-helper/**"
+      - ".github/workflows/highgas-macos-runtime.yml"
+  workflow_dispatch:
+
+env:
+  TUN2SOCKS_VERSION: "2.7.0"
+  TUN2SOCKS_AMD64_SHA256: "6e654da8bab9ca1645862f0e251a69980e0966680713011feea7b1e5901b2a95"
+
+jobs:
+  intel-runtime:
+    runs-on: macos-14
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run 15 native macOS checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          C=0
+          pass(){ C=$((C+1)); echo "MAC_PASS $C - $1"; }
+          command -v /sbin/pfctl >/dev/null && pass pfctl
+          command -v /sbin/route >/dev/null && pass route
+          command -v /sbin/ifconfig >/dev/null && pass ifconfig
+          command -v /usr/sbin/networksetup >/dev/null && pass networksetup
+          command -v /usr/bin/security >/dev/null && pass security
+          command -v /bin/launchctl >/dev/null && pass launchctl
+          zsh -n local-helper/highgas-tor && pass highgas-tor-zsh
+          zsh -n local-helper/install.command && pass installer-zsh
+          id _www >/dev/null && pass isolated-user
+          grep -Eq 'anchor[[:space:]]+"com\.apple/\*"' /etc/pf.conf && pass apple-anchor
+
+          cat >/tmp/highgas-pf-test.conf <<'EOF'
+          pass out quick on lo0 all
+          pass out quick on en0 route-to (en0 192.0.2.1) inet proto tcp user _www keep state
+          block drop out quick on en0 inet all
+          block drop out quick inet6 all
+          EOF
+          sudo /sbin/pfctl -nf /tmp/highgas-pf-test.conf && pass pf-syntax
+
+          curl --fail --location --retry 3 \
+            "https://github.com/xjasonlyu/tun2socks/releases/download/v${TUN2SOCKS_VERSION}/tun2socks-darwin-amd64.zip" \
+            -o /tmp/tun2socks.zip
+          echo "${TUN2SOCKS_AMD64_SHA256}  /tmp/tun2socks.zip" | shasum -a 256 -c - && pass tun2socks-sha
+          mkdir -p /tmp/t2s && unzip -q /tmp/tun2socks.zip -d /tmp/t2s
+          TUN="$(find /tmp/t2s -type f -name 'tun2socks*' ! -name '*.zip' ! -name '*LICENSE*' -print -quit)"
+          test -n "$TUN" && chmod +x "$TUN"
+          file "$TUN" | grep -Eqi 'x86_64|x86-64' && pass tun2socks-intel
+
+          sudo "$TUN" -device utun230 -proxy socks5://127.0.0.1:9 -loglevel error >/tmp/t2s.log 2>&1 &
+          PID=$!
+          trap 'sudo kill "$PID" >/dev/null 2>&1 || true; sudo /sbin/route -q -n delete -inet 203.0.113.0/24 -interface utun230 >/dev/null 2>&1 || true' EXIT
+          for i in {1..40}; do
+            /sbin/ifconfig utun230 >/dev/null 2>&1 && break
+            sleep 0.2
+          done
+          /sbin/ifconfig utun230 >/dev/null && pass utun-created
+          sudo /sbin/ifconfig utun230 inet 198.18.0.1 198.18.0.1 up
+          sudo /sbin/route -q -n add -inet 203.0.113.0/24 -interface utun230
+          /sbin/route -n get 203.0.113.1 | grep -q 'interface: utun230' && pass route-through-utun
+          sudo /sbin/route -q -n delete -inet 203.0.113.0/24 -interface utun230
+          sudo kill "$PID" >/dev/null 2>&1 || true
+          wait "$PID" 2>/dev/null || true
+          trap - EXIT
+          echo "TOTAL_MAC_RUNTIME_TESTS=$C"
+          test "$C" -ge 15
