@@ -7,7 +7,7 @@ on:
       - ".github/workflows/highgas-local-helper.yml"
   push:
     branches:
-      - highgas-local-helper
+      - highgas-wireguard-cli
     paths:
       - "local-helper/**"
       - ".github/workflows/highgas-local-helper.yml"
@@ -16,60 +16,45 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-
+    timeout-minutes: 15
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
         with:
-          go-version: '1.22.x'
+          go-version: '1.23.x'
           cache-dependency-path: local-helper/go.mod
-
-      - name: Test build
+      - name: Validate helper
         working-directory: local-helper
         run: |
-          go vet ./...
-          go test ./...
-
-      - name: Build Intel macOS helper
-        working-directory: local-helper
-        env:
-          CGO_ENABLED: 0
-          GOOS: darwin
-          GOARCH: amd64
-        run: go build -trimpath -ldflags='-s -w' -o dist/intel/highgas-helper .
-
-      - name: Build Apple Silicon helper
-        working-directory: local-helper
-        env:
-          CGO_ENABLED: 0
-          GOOS: darwin
-          GOARCH: arm64
-        run: go build -trimpath -ldflags='-s -w' -o dist/apple-silicon/highgas-helper .
-
-      - name: Package installers
-        working-directory: local-helper
+          go vet ./cli
+          go test ./cli
+      - name: Fetch pinned WireGuard Go
+        run: git clone --depth 1 --branch 0.0.20250522 https://git.zx2c4.com/wireguard-go /tmp/wireguard-go
+      - name: Build macOS packages
+        shell: bash
         run: |
           set -euo pipefail
-          for arch in intel apple-silicon; do
-            cp install.command "dist/$arch/install.command"
-            cp uninstall.command "dist/$arch/uninstall.command"
-            chmod +x "dist/$arch/highgas-helper" "dist/$arch/install.command" "dist/$arch/uninstall.command"
+          mkdir -p local-helper/dist/intel local-helper/dist/apple-silicon
+          for spec in 'intel amd64' 'apple-silicon arm64'; do
+            set -- $spec
+            out="$1"
+            arch="$2"
+            (cd local-helper && CGO_ENABLED=0 GOOS=darwin GOARCH="$arch" go build -trimpath -ldflags='-s -w' -o "dist/$out/highgas-helper" ./cli)
+            (cd /tmp/wireguard-go && CGO_ENABLED=0 GOOS=darwin GOARCH="$arch" go build -trimpath -ldflags='-s -w' -o "$GITHUB_WORKSPACE/local-helper/dist/$out/wireguard-go" .)
+            cp local-helper/highgas-tunnel local-helper/install.command local-helper/uninstall.command "local-helper/dist/$out/"
+            chmod +x "local-helper/dist/$out/"{highgas-helper,wireguard-go,highgas-tunnel,install.command,uninstall.command}
           done
-
-      - name: Upload Intel package
-        uses: actions/upload-artifact@v4
+      - name: Validate package shape
+        run: |
+          grep -q '^#!/bin/zsh' local-helper/highgas-tunnel
+          grep -q 'wireguard-go' local-helper/install.command
+      - uses: actions/upload-artifact@v4
         with:
-          name: HighGAS-Helper-macOS-Intel
+          name: HighGAS-WireGuard-macOS-Intel
           path: local-helper/dist/intel/
           if-no-files-found: error
-
-      - name: Upload Apple Silicon package
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: HighGAS-Helper-macOS-Apple-Silicon
+          name: HighGAS-WireGuard-macOS-Apple-Silicon
           path: local-helper/dist/apple-silicon/
           if-no-files-found: error
