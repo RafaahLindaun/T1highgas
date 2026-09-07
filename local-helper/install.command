@@ -12,7 +12,7 @@ CAKEY="$CERTDIR/highgas-local-ca.key"
 SERVERCERT="$CERTDIR/server.crt"
 SERVERKEY="$CERTDIR/server.key"
 
-for f in highgas-helper highgas-tunnel highgas-tor wireguard-go; do
+for f in highgas-helper highgas-tunnel highgas-tor wireguard-go tun2socks; do
   [[ -f "$ROOT/$f" ]] || { echo "Pacote incompleto: $f"; read -k 1 '?Fechar'; exit 1; }
 done
 [[ -f "$ROOT/highgas-local-controller.js" ]] || { echo "Pacote incompleto: controlador local"; read -k 1 '?Fechar'; exit 1; }
@@ -21,19 +21,29 @@ done
 
 /usr/bin/xattr -dr com.apple.quarantine "$ROOT" >/dev/null 2>&1 || true
 
-echo "O HighGAS precisa da senha administrativa uma única vez para instalar WireGuard, Tor e a interface local segura."
+echo "O HighGAS precisa da senha administrativa uma única vez para instalar Full Tunnel, Kill Switch, Tor e WireGuard."
 sudo -v
+
+# Se uma versão anterior estiver ativa, restaura a rede antes de substituir os binários.
+if sudo /bin/test -x "$SYSTEM/highgas-tor"; then
+  sudo "$SYSTEM/highgas-tor" down >/dev/null 2>&1 || true
+fi
+if sudo /bin/test -x "$SYSTEM/highgas-tunnel"; then
+  sudo "$SYSTEM/highgas-tunnel" down >/dev/null 2>&1 || true
+fi
 
 /bin/launchctl bootout "gui/$UID/app.highgas.helper" >/dev/null 2>&1 || true
 rm -f "$HOME/Library/LaunchAgents/app.highgas.helper.plist" >/dev/null 2>&1 || true
 sudo /bin/launchctl bootout system/app.highgas.helper >/dev/null 2>&1 || true
 
 sudo /bin/mkdir -p "$SYSTEM/profiles" "$CERTDIR" /var/run/highgas /var/run/wireguard
-for f in highgas-helper highgas-tunnel highgas-tor wireguard-go; do
+for f in highgas-helper highgas-tunnel highgas-tor wireguard-go tun2socks; do
   sudo /bin/cp "$ROOT/$f" "$SYSTEM/$f"
 done
 sudo /bin/cp "$ROOT/highgas-local-controller.js" "$SYSTEM/highgas-local-controller.js"
-sudo /bin/rm -rf "$SYSTEM/tor-expert"
+[[ -f "$ROOT/TOR-NOTICE.txt" ]] && sudo /bin/cp "$ROOT/TOR-NOTICE.txt" "$SYSTEM/TOR-NOTICE.txt"
+[[ -f "$ROOT/TUN2SOCKS-NOTICE.txt" ]] && sudo /bin/cp "$ROOT/TUN2SOCKS-NOTICE.txt" "$SYSTEM/TUN2SOCKS-NOTICE.txt"
+sudo /bin/rm -rf "$SYSTEM/tor-expert" "$SYSTEM/tor-runtime"
 sudo /bin/cp -R "$ROOT/tor-expert" "$SYSTEM/tor-expert"
 
 if [[ ! -s "$CACERT" || ! -s "$CAKEY" || ! -s "$SERVERCERT" || ! -s "$SERVERKEY" ]]; then
@@ -83,7 +93,7 @@ else
 fi
 
 sudo /usr/sbin/chown -R root:wheel "$SYSTEM"
-sudo /bin/chmod 700 "$SYSTEM" "$SYSTEM/profiles" "$CERTDIR" "$SYSTEM/highgas-helper" "$SYSTEM/highgas-tunnel" "$SYSTEM/highgas-tor" "$SYSTEM/wireguard-go"
+sudo /bin/chmod 700 "$SYSTEM" "$SYSTEM/profiles" "$CERTDIR" "$SYSTEM/highgas-helper" "$SYSTEM/highgas-tunnel" "$SYSTEM/highgas-tor" "$SYSTEM/wireguard-go" "$SYSTEM/tun2socks"
 sudo /bin/chmod 644 "$SYSTEM/highgas-local-controller.js"
 sudo /bin/chmod -R u+rwX,go-rwx "$SYSTEM/tor-expert"
 sudo /bin/chmod 700 "$SYSTEM/tor-expert/tor/tor"
@@ -129,22 +139,22 @@ sudo /bin/launchctl kickstart -k system/app.highgas.helper
 sleep 1
 
 HEALTH="$(sudo /usr/bin/curl -fsS --max-time 5 --cacert "$CACERT" https://127.0.0.1:37654/v1/health 2>/dev/null || true)"
-if [[ "$HEALTH" == *'"torReady":true'* && "$HEALTH" == *'"controllerReady":true'* ]]; then
-  echo "HighGAS Local direto: Tor + controlador instalados."
+if [[ "$HEALTH" == *'"torReady":true'* && "$HEALTH" == *'"controllerReady":true'* ]] && sudo /bin/test -x "$SYSTEM/tun2socks"; then
+  echo "HighGAS Full Tunnel instalado: Tor + Kill Switch + DNS protegido + controlador local."
   WEBLOC="$HOME/Desktop/HighGAS.webloc"
   cat > "$WEBLOC" <<EOF_WEBLOC
 <?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0.dtd">
 <plist version="1.0"><dict><key>URL</key><string>$SITE/</string></dict></plist>
 EOF_WEBLOC
-  echo "Atalho HighGAS criado na Mesa."
+  echo "Atalho HighGAS criado/atualizado na Mesa."
   echo "Link fixo: $SITE/"
   /usr/bin/open "$SITE/"
 else
   echo "O serviço não passou na verificação final. Log: $SYSTEM/helper-error.log"
-  echo "Não vou abrir o HighGAS até Tor e controlador local estarem saudáveis."
+  echo "Não vou abrir o HighGAS até todos os motores estarem saudáveis."
 fi
 
-echo "Pronto. Depois desta instalação você abre o HighGAS pelo atalho da Mesa ou por $SITE/."
+echo "Pronto. Ao conectar, o HighGAS só mostra CONECTADO após IP, país, DNS, IPv6 e Kill Switch passarem."
 read -k 1 '?Pressione qualquer tecla para fechar.'
 echo
