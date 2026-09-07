@@ -15,7 +15,6 @@ export default async function handler(req, res) {
   try {
     const response = await fetch(endpoint, {
       headers: { Accept: "application/json" },
-      cache: "no-store",
     });
 
     if (!response.ok) {
