@@ -1,11 +1,13 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   fallbackServers,
   loadVpnServers,
+  type CatalogSource,
   type VpnServer,
 } from "./lib/highgasData";
 
 type Tab = "home" | "locations" | "setup" | "diagnostics";
+type ConnectionPhase = "idle" | "preparing" | "waiting" | "connected" | "attention";
 
 type NetworkInfo = {
   ip: string | null;
@@ -23,26 +25,58 @@ type ImportedConfig = {
 const tabs: { id: Tab; label: string; icon: string }[] = [
   { id: "home", label: "Início", icon: "⌂" },
   { id: "locations", label: "Países", icon: "◎" },
-  { id: "setup", label: "Configurar", icon: "⚙" },
-  { id: "diagnostics", label: "Diagnóstico", icon: "◌" },
+  { id: "setup", label: "Perfil", icon: "◇" },
+  { id: "diagnostics", label: "Status", icon: "◉" },
 ];
 
 const flagFromCode = (code: string) =>
   code
     .toUpperCase()
-    .replace(/./g, (char) =>
-      String.fromCodePoint(127397 + char.charCodeAt(0))
-    );
+    .replace(/./g, (char) => String.fromCodePoint(127397 + char.charCodeAt(0)));
 
-const formatTime = (value: string | null) => {
+const formatClock = (value: string | null) => {
   if (!value) return "—";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "—";
   return date.toLocaleTimeString("pt-BR", {
     hour: "2-digit",
     minute: "2-digit",
+    second: "2-digit",
   });
 };
+
+const formatDuration = (totalSeconds: number) => {
+  const safe = Math.max(0, Math.floor(totalSeconds));
+  const hours = Math.floor(safe / 3600);
+  const minutes = Math.floor((safe % 3600) / 60);
+  const seconds = safe % 60;
+  return [hours, minutes, seconds]
+    .map((value) => String(value).padStart(2, "0"))
+    .join(":");
+};
+
+const deviceLabel = () => {
+  const ua = navigator.userAgent;
+  if (/iPhone|iPad|iPod/i.test(ua)) return "iPhone / iPad";
+  if (/Android/i.test(ua)) return "Android";
+  if (/Macintosh|Mac OS X/i.test(ua)) return "Mac";
+  if (/Windows/i.test(ua)) return "Windows";
+  return "Navegador";
+};
+
+async function fetchNetworkSnapshot(): Promise<NetworkInfo> {
+  const response = await fetch(`/api/network-info?ts=${Date.now()}`, {
+    method: "GET",
+    cache: "no-store",
+    headers: { Accept: "application/json" },
+  });
+
+  if (!response.ok) {
+    throw new Error(`network_${response.status}`);
+  }
+
+  return (await response.json()) as NetworkInfo;
+}
 
 function StatusDot({ status }: { status: VpnServer["status"] }) {
   return (
@@ -81,6 +115,7 @@ function ServerCard({
       type="button"
       className={`server-card ${selected ? "server-card--selected" : ""}`}
       onClick={onSelect}
+      disabled={server.status === "offline"}
     >
       <span className="flag">{flagFromCode(server.country_code)}</span>
       <span className="server-copy">
@@ -91,7 +126,7 @@ function ServerCard({
       </span>
       <span className="server-side">
         <StatusDot status={server.status} />
-        {server.is_recommended ? <small>Recomendado</small> : <small>Disponível</small>}
+        <small>{server.is_recommended ? "Recomendado" : "Disponível"}</small>
       </span>
     </button>
   );
@@ -100,9 +135,7 @@ function ServerCard({
 function App() {
   const [activeTab, setActiveTab] = useState<Tab>("home");
   const [servers, setServers] = useState<VpnServer[]>(fallbackServers);
-  const [serverSource, setServerSource] = useState<"supabase" | "fallback">(
-    "fallback"
-  );
+  const [serverSource, setServerSource] = useState<CatalogSource>("fallback");
   const [selectedCode, setSelectedCode] = useState(() => {
     try {
       return localStorage.getItem("highgas:selected-server") || "br-sao-01";
@@ -113,21 +146,22 @@ function App() {
   const [config, setConfig] = useState<ImportedConfig | null>(null);
   const [configMessage, setConfigMessage] = useState("");
   const [network, setNetwork] = useState<NetworkInfo | null>(null);
+  const [baselineNetwork, setBaselineNetwork] = useState<NetworkInfo | null>(null);
+  const [phase, setPhase] = useState<ConnectionPhase>("idle");
+  const [connectionStartedAt, setConnectionStartedAt] = useState<string | null>(null);
+  const [connectionDetectedAt, setConnectionDetectedAt] = useState<string | null>(null);
+  const [sessionSeconds, setSessionSeconds] = useState(0);
+  const [statusMessage, setStatusMessage] = useState(
+    "Escolha um país e toque em Ligar VPN."
+  );
   const [networkLoading, setNetworkLoading] = useState(false);
   const [online, setOnline] = useState(() => navigator.onLine);
-  const [compactMode, setCompactMode] = useState(() => {
-    try {
-      return localStorage.getItem("highgas:compact-mode") === "true";
-    } catch {
-      return false;
-    }
-  });
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     let mounted = true;
 
-    loadVpnServers().then((result) => {
+    void loadVpnServers().then((result) => {
       if (!mounted) return;
       setServers(result.servers);
       setServerSource(result.source);
@@ -143,6 +177,12 @@ function App() {
       }
     });
 
+    void fetchNetworkSnapshot()
+      .then((snapshot) => {
+        if (mounted) setNetwork(snapshot);
+      })
+      .catch(() => undefined);
+
     return () => {
       mounted = false;
     };
@@ -152,21 +192,25 @@ function App() {
     try {
       localStorage.setItem("highgas:selected-server", selectedCode);
     } catch {
-      // The app still works when private mode blocks localStorage.
+      // Preference only.
     }
   }, [selectedCode]);
 
   useEffect(() => {
-    try {
-      localStorage.setItem("highgas:compact-mode", String(compactMode));
-    } catch {
-      // Non-critical preference.
-    }
-  }, [compactMode]);
-
-  useEffect(() => {
-    const handleOnline = () => setOnline(true);
-    const handleOffline = () => setOnline(false);
+    const handleOnline = () => {
+      setOnline(true);
+      if (phase === "attention") {
+        setPhase("waiting");
+        setStatusMessage("Internet voltou. Verificando a VPN automaticamente…");
+      }
+    };
+    const handleOffline = () => {
+      setOnline(false);
+      if (phase !== "idle") {
+        setPhase("attention");
+        setStatusMessage("Sem internet. O HighGAS volta a verificar assim que a rede retornar.");
+      }
+    };
 
     window.addEventListener("online", handleOnline);
     window.addEventListener("offline", handleOffline);
@@ -175,7 +219,7 @@ function App() {
       window.removeEventListener("online", handleOnline);
       window.removeEventListener("offline", handleOffline);
     };
-  }, []);
+  }, [phase]);
 
   const selectedServer = useMemo(
     () =>
@@ -185,7 +229,130 @@ function App() {
     [servers, selectedCode]
   );
 
-  const isReady = Boolean(config && selectedServer && online);
+  const isConnected = phase === "connected";
+  const isBusy = phase === "preparing" || phase === "waiting";
+  const targetMatches = Boolean(
+    network?.country &&
+      selectedServer &&
+      network.country.toUpperCase() === selectedServer.country_code.toUpperCase()
+  );
+  const ipChanged = Boolean(
+    baselineNetwork?.ip &&
+      network?.ip &&
+      baselineNetwork.ip !== network.ip
+  );
+
+  const evaluateConnection = useCallback(
+    (snapshot: NetworkInfo) => {
+      if (!selectedServer || phase === "idle" || phase === "preparing") return;
+
+      const sameTargetCountry =
+        snapshot.country?.toUpperCase() === selectedServer.country_code.toUpperCase();
+      const changedFromBaseline = Boolean(
+        baselineNetwork?.ip &&
+          snapshot.ip &&
+          baselineNetwork.ip !== snapshot.ip
+      );
+
+      if (changedFromBaseline && sameTargetCountry) {
+        setPhase("connected");
+        setConnectionDetectedAt((current) => current || new Date().toISOString());
+        setStatusMessage(
+          `VPN detectada em ${selectedServer.city}. O HighGAS continuará monitorando automaticamente.`
+        );
+        return;
+      }
+
+      if (
+        phase === "connected" &&
+        baselineNetwork?.ip &&
+        snapshot.ip === baselineNetwork.ip
+      ) {
+        setPhase("waiting");
+        setConnectionDetectedAt(null);
+        setSessionSeconds(0);
+        setStatusMessage(
+          "O IP voltou ao endereço anterior. Ative novamente o túnel no WireGuard."
+        );
+        return;
+      }
+
+      if (phase === "waiting") {
+        setStatusMessage(
+          `Aguardando o WireGuard assumir a conexão em ${selectedServer.country_name}. Você pode sair do navegador e voltar; eu verifico quando a página retornar.`
+        );
+      }
+    },
+    [baselineNetwork, phase, selectedServer]
+  );
+
+  const checkNetwork = useCallback(
+    async (silent = false) => {
+      if (!silent) setNetworkLoading(true);
+      try {
+        const snapshot = await fetchNetworkSnapshot();
+        setNetwork(snapshot);
+        evaluateConnection(snapshot);
+        return snapshot;
+      } catch {
+        if (!silent) {
+          setStatusMessage("Não consegui consultar seu IP agora. Vou tentar novamente sozinho.");
+        }
+        return null;
+      } finally {
+        if (!silent) setNetworkLoading(false);
+      }
+    },
+    [evaluateConnection]
+  );
+
+  useEffect(() => {
+    if (phase !== "waiting" && phase !== "connected") return;
+
+    const delay = phase === "waiting" ? 4000 : 12000;
+    const id = window.setInterval(() => {
+      void checkNetwork(true);
+    }, delay);
+
+    const refresh = () => {
+      if (document.visibilityState === "visible") void checkNetwork(true);
+    };
+
+    document.addEventListener("visibilitychange", refresh);
+    window.addEventListener("focus", refresh);
+
+    return () => {
+      window.clearInterval(id);
+      document.removeEventListener("visibilitychange", refresh);
+      window.removeEventListener("focus", refresh);
+    };
+  }, [checkNetwork, phase]);
+
+  useEffect(() => {
+    if (!connectionDetectedAt || phase !== "connected") {
+      setSessionSeconds(0);
+      return;
+    }
+
+    const tick = () => {
+      const detected = new Date(connectionDetectedAt).getTime();
+      setSessionSeconds(Math.max(0, Math.floor((Date.now() - detected) / 1000)));
+    };
+
+    tick();
+    const id = window.setInterval(tick, 1000);
+    return () => window.clearInterval(id);
+  }, [connectionDetectedAt, phase]);
+
+  useEffect(() => {
+    if (phase === "idle") return;
+    setBaselineNetwork(null);
+    setConnectionStartedAt(null);
+    setConnectionDetectedAt(null);
+    setSessionSeconds(0);
+    setPhase("idle");
+    setStatusMessage("País alterado. Toque em Ligar VPN para iniciar uma nova verificação.");
+  }, [selectedCode]);
 
   const chooseServer = (server: VpnServer) => {
     if (server.status === "offline") return;
@@ -198,8 +365,8 @@ function App() {
   ) => {
     const file = event.target.files?.[0];
     event.target.value = "";
-
     if (!file) return;
+
     setConfigMessage("");
 
     if (file.size > 64 * 1024) {
@@ -209,17 +376,18 @@ function App() {
 
     const text = await file.text();
     const looksLikeWireGuard =
-      /\[Interface\]/i.test(text) && /\[Peer\]/i.test(text);
+      /\[Interface\]/i.test(text) &&
+      /\[Peer\]/i.test(text) &&
+      /PrivateKey\s*=/i.test(text);
 
     if (!looksLikeWireGuard) {
-      setConfigMessage(
-        "O arquivo não parece um perfil WireGuard válido (.conf)."
-      );
+      setConfigMessage("O arquivo não parece um perfil WireGuard válido (.conf).");
       return;
     }
 
     setConfig({ name: file.name, content: text });
-    setConfigMessage("Perfil carregado somente neste navegador.");
+    setConfigMessage("Perfil validado. Ele fica somente neste navegador.");
+    setStatusMessage("Perfil pronto. Agora toque em Ligar VPN.");
   };
 
   const downloadConfig = () => {
@@ -229,7 +397,7 @@ function App() {
     }
 
     const blob = new Blob([config.content], {
-      type: "text/plain;charset=utf-8",
+      type: "application/octet-stream",
     });
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement("a");
@@ -243,144 +411,230 @@ function App() {
     URL.revokeObjectURL(url);
   };
 
-  const checkNetwork = async () => {
-    setNetworkLoading(true);
+  const handoffConfig = async () => {
+    if (!config) return false;
+
+    const file = new File(
+      [config.content],
+      config.name.endsWith(".conf") ? config.name : `${config.name}.conf`,
+      { type: "application/octet-stream" }
+    );
+
+    const sharePayload = {
+      files: [file],
+      title: "HighGAS WireGuard",
+      text: "Abra este perfil no WireGuard e ative o túnel.",
+    };
+
     try {
-      const response = await fetch("/api/network-info", {
-        method: "GET",
-        cache: "no-store",
-        headers: { Accept: "application/json" },
-      });
-      if (!response.ok) throw new Error("Falha ao consultar rede.");
-      const data = (await response.json()) as NetworkInfo;
-      setNetwork(data);
+      if (
+        typeof navigator.share === "function" &&
+        typeof navigator.canShare === "function" &&
+        navigator.canShare(sharePayload)
+      ) {
+        await navigator.share(sharePayload);
+        return true;
+      }
     } catch {
-      setNetwork({
-        ip: null,
-        country: null,
-        city: null,
-        source: "browser",
-        checkedAt: new Date().toISOString(),
-      });
-    } finally {
-      setNetworkLoading(false);
+      // If the share sheet is cancelled, keep the fallback download available.
     }
+
+    downloadConfig();
+    return true;
   };
+
+  const startConnection = async () => {
+    if (!online) {
+      setPhase("attention");
+      setStatusMessage("Sem internet. Conecte o dispositivo a uma rede primeiro.");
+      return;
+    }
+
+    if (!selectedServer) {
+      setActiveTab("locations");
+      return;
+    }
+
+    if (!config) {
+      setStatusMessage("Importe seu perfil WireGuard uma vez para continuar.");
+      fileInputRef.current?.click();
+      return;
+    }
+
+    setPhase("preparing");
+    setConnectionDetectedAt(null);
+    setSessionSeconds(0);
+    setStatusMessage("Preparando o perfil e registrando seu IP atual…");
+
+    const baselinePromise = fetchNetworkSnapshot().catch(() => null);
+    await handoffConfig();
+
+    const baseline = await baselinePromise;
+    if (baseline) {
+      setBaselineNetwork(baseline);
+      setNetwork(baseline);
+    } else {
+      setBaselineNetwork(network);
+    }
+
+    setConnectionStartedAt(new Date().toISOString());
+    setPhase("waiting");
+    setStatusMessage(
+      "Ative o túnel no WireGuard. O HighGAS já está verificando sozinho e confirma assim que o IP mudar."
+    );
+
+    window.setTimeout(() => {
+      void checkNetwork(true);
+    }, 1500);
+  };
+
+  const stopMonitoring = () => {
+    setPhase("idle");
+    setBaselineNetwork(null);
+    setConnectionStartedAt(null);
+    setConnectionDetectedAt(null);
+    setSessionSeconds(0);
+    setStatusMessage(
+      "Monitoramento encerrado. Para desligar a VPN de verdade, desligue o túnel no WireGuard."
+    );
+  };
+
+  const phaseLabel = {
+    idle: "Não conectado",
+    preparing: "Preparando",
+    waiting: "Aguardando VPN",
+    connected: "Conectado",
+    attention: "Sem rede",
+  }[phase];
+
+  const powerLabel = isConnected
+    ? "VPN CONECTADA"
+    : isBusy
+      ? "VERIFICANDO…"
+      : "LIGAR VPN";
 
   const renderHome = () => (
     <section className="page page--home">
-      <div className="eyebrow-row">
-        <span className={`availability ${online ? "availability--ok" : ""}`}>
-          <i />
-          {online ? "Internet disponível" : "Sem conexão"}
-        </span>
-        <span className="source-chip">
-          {serverSource === "supabase" ? "Cloud" : "Local"}
-        </span>
+      <div className="connection-banner">
+        <span className={`live-dot live-dot--${phase}`} />
+        <div>
+          <small>STATUS DA VPN</small>
+          <strong>{phaseLabel}</strong>
+        </div>
+        <div className="banner-time">
+          <small>SESSÃO</small>
+          <strong>{isConnected ? formatDuration(sessionSeconds) : "00:00:00"}</strong>
+        </div>
       </div>
 
-      <article className="hero-card">
-        <div className="hero-glow" aria-hidden="true" />
-        <div className="hero-top">
+      <article className={`power-card power-card--${phase}`}>
+        <div className="power-aura" aria-hidden="true" />
+        <div className="power-location">
+          <span>{selectedServer ? flagFromCode(selectedServer.country_code) : "◎"}</span>
           <div>
-            <p>Localização escolhida</p>
-            <h1>
+            <small>SAÍDA ESCOLHIDA</small>
+            <strong>
               {selectedServer
-                ? `${flagFromCode(selectedServer.country_code)} ${selectedServer.country_name}`
-                : "Selecionar servidor"}
-            </h1>
-            <span>
-              {selectedServer
-                ? `${selectedServer.city} · WireGuard`
-                : "Nenhum servidor disponível"}
-            </span>
+                ? `${selectedServer.country_name} · ${selectedServer.city}`
+                : "Escolha um país"}
+            </strong>
           </div>
-          <div className={`shield ${isReady ? "shield--ready" : ""}`}>
-            <span />
-          </div>
-        </div>
-
-        <div className="connection-state">
-          <div>
-            <small>ESTADO</small>
-            <strong>{isReady ? "Pronto para usar" : "Configuração pendente"}</strong>
-          </div>
-          <span className={`state-pill ${isReady ? "state-pill--ready" : ""}`}>
-            {isReady ? "Perfil OK" : "Sem túnel"}
-          </span>
+          <button type="button" onClick={() => setActiveTab("locations")}>
+            Trocar
+          </button>
         </div>
 
         <button
           type="button"
-          className="primary-button"
-          onClick={() =>
-            config ? downloadConfig() : fileInputRef.current?.click()
-          }
+          className={`power-button power-button--${phase}`}
+          onClick={() => {
+            if (isConnected) {
+              setActiveTab("diagnostics");
+            } else if (!isBusy) {
+              void startConnection();
+            }
+          }}
+          disabled={isBusy}
+          aria-label={powerLabel}
         >
-          <span className="primary-button__icon">{config ? "↓" : "+"}</span>
-          <span>
-            <strong>{config ? "Baixar perfil WireGuard" : "Importar perfil WireGuard"}</strong>
-            <small>
-              {config
-                ? "Abra o arquivo no app WireGuard do dispositivo"
-                : "O arquivo fica somente nesta sessão"}
-            </small>
-          </span>
+          <span className="power-symbol" aria-hidden="true" />
+          <strong>{powerLabel}</strong>
+          <small>
+            {isConnected
+              ? `${network?.ip || "IP protegido"} · ${network?.city || selectedServer?.city || "VPN"}`
+              : config
+                ? "1 toque · verificação automática"
+                : "Importe o perfil uma vez"}
+          </small>
         </button>
+
+        <div className="connection-check">
+          <span className={`check-icon ${isConnected ? "check-icon--ok" : ""}`}>
+            {isConnected ? "✓" : "·"}
+          </span>
+          <div>
+            <strong>
+              {isConnected ? "Você está conectado" : "Aguardando conexão segura"}
+            </strong>
+            <small>{statusMessage}</small>
+          </div>
+        </div>
 
         <input
           ref={fileInputRef}
           className="visually-hidden"
           type="file"
-          accept=".conf,text/plain"
+          accept=".conf,text/plain,application/octet-stream"
           onChange={handleConfigFile}
         />
-
-        {configMessage ? <p className="inline-message">{configMessage}</p> : null}
-
-        <p className="privacy-note">
-          <span>◆</span>
-          O HighGAS não envia nem salva sua chave privada no Supabase.
-        </p>
       </article>
 
-      <div className="section-heading">
-        <div>
-          <small>ACESSO RÁPIDO</small>
-          <h2>Seu servidor</h2>
-        </div>
-        <button type="button" onClick={() => setActiveTab("locations")}>
-          Ver países
-        </button>
+      <div className="status-grid">
+        <article>
+          <small>IP ATUAL</small>
+          <strong>{network?.ip || "Verificando…"}</strong>
+          <span>{network?.country || "—"} · {network?.city || "—"}</span>
+        </article>
+        <article>
+          <small>PERFIL</small>
+          <strong>{config ? "Pronto" : "Pendente"}</strong>
+          <span>{config?.name || "WireGuard .conf"}</span>
+        </article>
+        <article>
+          <small>MONITOR</small>
+          <strong>{phase === "waiting" || phase === "connected" ? "Automático" : "Em espera"}</strong>
+          <span>{phase === "waiting" ? "a cada 4s" : phase === "connected" ? "a cada 12s" : "ativa ao ligar"}</span>
+        </article>
       </div>
 
-      {selectedServer ? (
-        <ServerCard
-          server={selectedServer}
-          selected
-          onSelect={() => setActiveTab("locations")}
-        />
-      ) : null}
-
-      <div className="quick-grid">
-        <button type="button" className="quick-card" onClick={() => setActiveTab("setup")}>
-          <span className="quick-icon">⚙</span>
-          <strong>Configurar</strong>
-          <small>WireGuard e DNS</small>
-        </button>
+      {!config ? (
         <button
           type="button"
-          className="quick-card"
-          onClick={() => {
-            setActiveTab("diagnostics");
-            void checkNetwork();
-          }}
+          className="profile-cta"
+          onClick={() => fileInputRef.current?.click()}
         >
-          <span className="quick-icon">↗</span>
-          <strong>Verificar IP</strong>
-          <small>Confirme a saída VPN</small>
+          <span>＋</span>
+          <div>
+            <strong>Adicionar perfil WireGuard</strong>
+            <small>Necessário só para iniciar o túnel no sistema.</small>
+          </div>
         </button>
-      </div>
+      ) : (
+        <div className="profile-ready">
+          <span>✓</span>
+          <div>
+            <strong>Perfil pronto</strong>
+            <small>{configMessage || "Chave privada não é enviada ao servidor."}</small>
+          </div>
+          <button type="button" onClick={() => fileInputRef.current?.click()}>
+            Trocar
+          </button>
+        </div>
+      )}
+
+      <p className="system-note">
+        O HighGAS monitora e confirma a conexão sozinho. A ativação do túnel continua sendo autorizada pelo sistema operacional no WireGuard.
+      </p>
     </section>
   );
 
@@ -388,11 +642,13 @@ function App() {
     <section className="page">
       <div className="page-title">
         <small>SERVIDORES</small>
-        <h1>Escolha um país</h1>
-        <p>
-          O HighGAS usa uma lista pequena de destinos para manter a interface
-          rápida e previsível.
-        </p>
+        <h1>Escolha a saída</h1>
+        <p>O país fica salvo neste dispositivo. Ao trocar, o HighGAS reinicia o monitoramento para evitar status falso.</p>
+      </div>
+
+      <div className="source-row">
+        <span>Catálogo</span>
+        <strong>{serverSource === "neon" ? "Neon online" : "Fallback seguro"}</strong>
       </div>
 
       <div className="server-list">
@@ -405,217 +661,181 @@ function App() {
           />
         ))}
       </div>
-
-      <div className="info-card">
-        <span>i</span>
-        <div>
-          <strong>Catálogo seguro</strong>
-          <p>
-            O frontend lê apenas países e status. Chaves privadas nunca devem
-            ficar em uma tabela pública do Supabase.
-          </p>
-        </div>
-      </div>
     </section>
   );
 
   const renderSetup = () => (
     <section className="page">
       <div className="page-title">
-        <small>CONFIGURAÇÃO</small>
-        <h1>Deixe pronto uma vez</h1>
+        <small>PERFIL VPN</small>
+        <h1>Configure uma vez</h1>
         <p>
-          Para VPN de sistema, o navegador entrega o perfil e o WireGuard faz o
-          túnel no iPhone, Android, Mac ou Windows.
+          O HighGAS valida o arquivo e tenta entregá-lo ao sistema. Em iPhone e Android, usa a folha de compartilhamento quando disponível; em Mac e Windows, baixa o .conf para abrir no WireGuard.
         </p>
       </div>
 
-      <div className="step-list">
-        <article className="step-card">
-          <span className="step-number">1</span>
+      <article className="setup-card">
+        <div className={`setup-status ${config ? "setup-status--ok" : ""}`}>
+          <span>{config ? "✓" : "1"}</span>
           <div>
-            <strong>Instale o WireGuard</strong>
-            <p>
-              Use o aplicativo oficial no dispositivo em que você quer ativar a
-              VPN.
-            </p>
+            <strong>{config ? "Perfil WireGuard validado" : "Importe um perfil .conf"}</strong>
+            <small>{config ? config.name : "O arquivo precisa conter [Interface], [Peer] e PrivateKey."}</small>
           </div>
-        </article>
-
-        <article className="step-card">
-          <span className="step-number">2</span>
-          <div>
-            <strong>Importe seu perfil .conf</strong>
-            <p>
-              Carregue o arquivo aqui para validar e depois abra o mesmo perfil
-              no WireGuard.
-            </p>
-            <button
-              type="button"
-              className="secondary-button"
-              onClick={() => fileInputRef.current?.click()}
-            >
-              {config ? `Trocar ${config.name}` : "Escolher arquivo"}
-            </button>
-          </div>
-        </article>
-
-        <article className="step-card">
-          <span className="step-number">3</span>
-          <div>
-            <strong>Ative e confira seu IP</strong>
-            <p>
-              Ligue o túnel no WireGuard e volte ao diagnóstico do HighGAS para
-              conferir país e IP de saída.
-            </p>
-            <button
-              type="button"
-              className="secondary-button"
-              onClick={() => {
-                setActiveTab("diagnostics");
-                void checkNetwork();
-              }}
-            >
-              Abrir diagnóstico
-            </button>
-          </div>
-        </article>
-      </div>
-
-      <article className="settings-card">
-        <div className="settings-row">
-          <div>
-            <strong>Protocolo preferido</strong>
-            <small>WireGuard</small>
-          </div>
-          <span className="value-pill">WG</span>
         </div>
-        <div className="settings-row">
+        <button
+          type="button"
+          className="secondary-button"
+          onClick={() => fileInputRef.current?.click()}
+        >
+          {config ? "Trocar perfil" : "Escolher arquivo"}
+        </button>
+      </article>
+
+      <article className="setup-card">
+        <div className="setup-status">
+          <span>2</span>
           <div>
-            <strong>DNS recomendado</strong>
-            <small>1.1.1.1 · 1.0.0.1</small>
+            <strong>Entregar ao WireGuard</strong>
+            <small>O sistema operacional precisa autorizar a criação/ativação da VPN.</small>
           </div>
-          <button
-            type="button"
-            className="text-action"
-            onClick={() => void navigator.clipboard?.writeText("1.1.1.1, 1.0.0.1")}
-          >
-            Copiar
-          </button>
         </div>
-        <div className="settings-row">
+        <button
+          type="button"
+          className="secondary-button"
+          disabled={!config}
+          onClick={() => void handoffConfig()}
+        >
+          Abrir perfil no sistema
+        </button>
+      </article>
+
+      <article className="setup-card">
+        <div className="setup-status">
+          <span>3</span>
           <div>
-            <strong>Interface compacta</strong>
-            <small>Melhor para telas pequenas</small>
+            <strong>Monitoramento automático</strong>
+            <small>Depois de tocar em Ligar VPN, o HighGAS checa o IP a cada 4 segundos até detectar a saída escolhida.</small>
           </div>
-          <button
-            type="button"
-            className={`switch ${compactMode ? "switch--on" : ""}`}
-            aria-pressed={compactMode}
-            onClick={() => setCompactMode((value) => !value)}
-          >
-            <span />
-          </button>
+        </div>
+        <div className="mini-specs">
+          <span>WireGuard</span>
+          <span>DNS 1.1.1.1</span>
+          <span>Auto-check</span>
         </div>
       </article>
+
+      <a
+        className="official-link"
+        href="https://www.wireguard.com/install/"
+        target="_blank"
+        rel="noreferrer"
+      >
+        Instalar o WireGuard oficial
+        <span>↗</span>
+      </a>
     </section>
   );
 
   const renderDiagnostics = () => (
     <section className="page">
       <div className="page-title">
-        <small>DIAGNÓSTICO</small>
-        <h1>Rede e estabilidade</h1>
-        <p>
-          Esta tela ajuda a confirmar se o dispositivo está online e se o IP de
-          saída mudou depois de ativar o WireGuard.
-        </p>
+        <small>DIAGNÓSTICO AO VIVO</small>
+        <h1>Conexão</h1>
+        <p>O status abaixo é baseado no IP público observado pelo HighGAS e no país de saída escolhido.</p>
       </div>
 
-      <article className="diagnostic-card">
-        <div className="diagnostic-status">
-          <div className={`pulse ${online ? "pulse--ok" : ""}`} />
+      <article className={`diagnostic-hero diagnostic-hero--${phase}`}>
+        <div className="diag-head">
+          <span className={`live-dot live-dot--${phase}`} />
           <div>
-            <small>INTERNET</small>
-            <strong>{online ? "Online" : "Offline"}</strong>
+            <small>VPN</small>
+            <strong>{phaseLabel}</strong>
           </div>
+          <span className="diag-timer">{isConnected ? formatDuration(sessionSeconds) : "—"}</span>
         </div>
 
-        <div className="diagnostic-grid">
+        <div className="diag-grid">
           <div>
-            <small>IP PÚBLICO</small>
-            <strong>{network?.ip || "Não verificado"}</strong>
+            <small>IP ATUAL</small>
+            <strong>{network?.ip || "—"}</strong>
+          </div>
+          <div>
+            <small>IP ANTES</small>
+            <strong>{baselineNetwork?.ip || "—"}</strong>
           </div>
           <div>
             <small>PAÍS</small>
             <strong>{network?.country || "—"}</strong>
           </div>
           <div>
-            <small>CIDADE</small>
-            <strong>{network?.city || "—"}</strong>
+            <small>ALVO</small>
+            <strong>{selectedServer?.country_code || "—"}</strong>
           </div>
-          <div>
-            <small>ÚLTIMA CHECAGEM</small>
-            <strong>{formatTime(network?.checkedAt || null)}</strong>
+        </div>
+
+        <div className="signal-list">
+          <div className={ipChanged ? "signal signal--ok" : "signal"}>
+            <span>{ipChanged ? "✓" : "·"}</span>
+            <p>IP mudou após ligar a VPN</p>
+          </div>
+          <div className={targetMatches ? "signal signal--ok" : "signal"}>
+            <span>{targetMatches ? "✓" : "·"}</span>
+            <p>País atual coincide com o selecionado</p>
+          </div>
+          <div className={online ? "signal signal--ok" : "signal"}>
+            <span>{online ? "✓" : "!"}</span>
+            <p>Internet disponível</p>
           </div>
         </div>
 
         <button
           type="button"
-          className="primary-button primary-button--simple"
-          onClick={() => void checkNetwork()}
+          className="secondary-button"
           disabled={networkLoading}
+          onClick={() => void checkNetwork(false)}
         >
-          {networkLoading ? "Verificando..." : "Verificar IP agora"}
+          {networkLoading ? "Verificando…" : "Verificar agora"}
         </button>
       </article>
 
-      <article className="device-card">
+      <article className="detail-card">
         <div>
           <small>DISPOSITIVO</small>
-          <strong>
-            {/iPhone|iPad|iPod/i.test(navigator.userAgent)
-              ? "iOS / iPadOS"
-              : /Android/i.test(navigator.userAgent)
-                ? "Android"
-                : /Macintosh|Mac OS X/i.test(navigator.userAgent)
-                  ? "macOS"
-                  : /Windows/i.test(navigator.userAgent)
-                    ? "Windows"
-                    : "Navegador"}
-          </strong>
+          <strong>{deviceLabel()}</strong>
         </div>
         <div>
-          <small>PAÍS SELECIONADO</small>
-          <strong>{selectedServer?.country_name || "—"}</strong>
+          <small>INÍCIO DA TENTATIVA</small>
+          <strong>{formatClock(connectionStartedAt)}</strong>
         </div>
         <div>
-          <small>PERFIL WG</small>
-          <strong>{config ? "Carregado" : "Pendente"}</strong>
+          <small>VPN DETECTADA</small>
+          <strong>{formatClock(connectionDetectedAt)}</strong>
+        </div>
+        <div>
+          <small>ÚLTIMA LEITURA</small>
+          <strong>{formatClock(network?.checkedAt || null)}</strong>
         </div>
       </article>
 
-      <div className="info-card info-card--warning">
-        <span>!</span>
-        <div>
-          <strong>O site não consegue ligar a VPN sozinho</strong>
-          <p>
-            Isso é uma proteção dos sistemas operacionais. A ativação do túnel
-            acontece no WireGuard; o HighGAS organiza o processo e verifica a
-            saída.
-          </p>
-        </div>
-      </div>
+      {phase !== "idle" ? (
+        <button type="button" className="ghost-button" onClick={stopMonitoring}>
+          Encerrar monitoramento
+        </button>
+      ) : null}
+
+      <p className="system-note">
+        “Conectado” significa que o HighGAS observou mudança de IP depois do comando e saída no país selecionado. O navegador não recebe do sistema operacional o estado interno do túnel WireGuard.
+      </p>
     </section>
   );
 
   return (
-    <div className={`app-shell ${compactMode ? "app-shell--compact" : ""}`}>
+    <div className="app-shell">
       <header className="topbar">
         <Brand />
-        <div className="topbar-status" title="Sem login">
+        <div className={`topbar-status topbar-status--${phase}`}>
           <span />
-          Pessoal
+          {phaseLabel}
         </div>
       </header>
 
