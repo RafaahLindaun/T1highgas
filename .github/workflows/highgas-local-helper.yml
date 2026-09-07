@@ -8,34 +8,72 @@ on:
   push:
     branches:
       - highgas-wireguard-cli
+      - highgas-tor-free
     paths:
       - "local-helper/**"
       - ".github/workflows/highgas-local-helper.yml"
   workflow_dispatch:
 
+env:
+  TOR_EXPERT_VERSION: "15.0.21"
+
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: '1.23.x'
           cache-dependency-path: local-helper/go.mod
+
       - name: Validate helper
         working-directory: local-helper
         run: |
           go vet ./cli
           go test ./cli
+
       - name: Validate zsh scripts
         run: |
           command -v zsh >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq zsh; }
           zsh -n local-helper/highgas-tunnel
+          zsh -n local-helper/highgas-tor
           zsh -n local-helper/install.command
           zsh -n local-helper/uninstall.command
+
       - name: Fetch pinned WireGuard Go
         run: git clone --depth 1 --branch 0.0.20250522 https://git.zx2c4.com/wireguard-go /tmp/wireguard-go
+
+      - name: Fetch official Tor Expert Bundles
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/tor-expert/intel /tmp/tor-expert/apple-silicon
+
+          curl --fail --location --retry 3 --retry-delay 2 \
+            "https://archive.torproject.org/tor-package-archive/torbrowser/${TOR_EXPERT_VERSION}/tor-expert-bundle-macos-x86_64-${TOR_EXPERT_VERSION}.tar.gz" \
+            -o /tmp/tor-intel.tar.gz
+          curl --fail --location --retry 3 --retry-delay 2 \
+            "https://archive.torproject.org/tor-package-archive/torbrowser/${TOR_EXPERT_VERSION}/tor-expert-bundle-macos-aarch64-${TOR_EXPERT_VERSION}.tar.gz" \
+            -o /tmp/tor-apple-silicon.tar.gz
+
+          tar -xzf /tmp/tor-intel.tar.gz -C /tmp/tor-expert/intel
+          tar -xzf /tmp/tor-apple-silicon.tar.gz -C /tmp/tor-expert/apple-silicon
+
+          test -x /tmp/tor-expert/intel/tor/tor
+          test -f /tmp/tor-expert/intel/data/geoip
+          test -f /tmp/tor-expert/intel/data/geoip6
+          test -x /tmp/tor-expert/apple-silicon/tor/tor
+          test -f /tmp/tor-expert/apple-silicon/data/geoip
+          test -f /tmp/tor-expert/apple-silicon/data/geoip6
+
+          file /tmp/tor-expert/intel/tor/tor | tee /tmp/tor-intel-file.txt
+          file /tmp/tor-expert/apple-silicon/tor/tor | tee /tmp/tor-arm-file.txt
+          grep -Eqi 'x86_64|x86-64' /tmp/tor-intel-file.txt
+          grep -Eqi 'arm64|aarch64' /tmp/tor-arm-file.txt
+          sha256sum /tmp/tor-intel.tar.gz /tmp/tor-apple-silicon.tar.gz
+
       - name: Build macOS packages
         shell: bash
         run: |
@@ -47,20 +85,32 @@ jobs:
             arch="$2"
             (cd local-helper && CGO_ENABLED=0 GOOS=darwin GOARCH="$arch" go build -trimpath -ldflags='-s -w' -o "dist/$out/highgas-helper" ./cli)
             (cd /tmp/wireguard-go && CGO_ENABLED=0 GOOS=darwin GOARCH="$arch" go build -trimpath -ldflags='-s -w' -o "$GITHUB_WORKSPACE/local-helper/dist/$out/wireguard-go" .)
-            cp local-helper/highgas-tunnel local-helper/install.command local-helper/uninstall.command "local-helper/dist/$out/"
-            chmod +x "local-helper/dist/$out/"{highgas-helper,wireguard-go,highgas-tunnel,install.command,uninstall.command}
+            cp local-helper/highgas-tunnel local-helper/highgas-tor local-helper/install.command local-helper/uninstall.command local-helper/TOR-NOTICE.txt "local-helper/dist/$out/"
+            mkdir -p "local-helper/dist/$out/tor-expert"
+            cp -R "/tmp/tor-expert/$out/." "local-helper/dist/$out/tor-expert/"
+            chmod +x "local-helper/dist/$out/"{highgas-helper,wireguard-go,highgas-tunnel,highgas-tor,install.command,uninstall.command}
+            chmod +x "local-helper/dist/$out/tor-expert/tor/tor"
           done
+
       - name: Validate package shape
         run: |
           grep -q '^#!/bin/zsh' local-helper/highgas-tunnel
-          grep -q 'wireguard-go' local-helper/install.command
+          grep -q '^#!/bin/zsh' local-helper/highgas-tor
+          grep -q 'tor-expert' local-helper/install.command
+          grep -q 'highgas-tor' local-helper/install.command
+          test -x local-helper/dist/intel/tor-expert/tor/tor
+          test -f local-helper/dist/intel/tor-expert/data/geoip
+          test -x local-helper/dist/apple-silicon/tor-expert/tor/tor
+          test -f local-helper/dist/apple-silicon/tor-expert/data/geoip
+
       - uses: actions/upload-artifact@v4
         with:
-          name: HighGAS-WireGuard-macOS-Intel
+          name: HighGAS-Tor-WireGuard-macOS-Intel
           path: local-helper/dist/intel/
           if-no-files-found: error
+
       - uses: actions/upload-artifact@v4
         with:
-          name: HighGAS-WireGuard-macOS-Apple-Silicon
+          name: HighGAS-Tor-WireGuard-macOS-Apple-Silicon
           path: local-helper/dist/apple-silicon/
           if-no-files-found: error
