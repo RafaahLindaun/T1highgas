@@ -62,7 +62,7 @@ jobs:
           trap 'sudo kill "$TPID" >/dev/null 2>&1 || true; [[ -n "${UTUN:-}" ]] && sudo /sbin/route -q -n delete -inet 203.0.113.0/24 -interface "$UTUN" >/dev/null 2>&1 || true' EXIT
           for i in $(seq 1 50); do test -s "$NAME" && break; kill -0 "$TPID" 2>/dev/null || { cat /tmp/t2s.log; exit 1; }; sleep .2; done
           test -s "$NAME" && pass utun-name-file
-          UTUN="$(tr -d '\r\n' < "$NAME")"; [[ "$UTUN" =~ ^utun[0-9]+$ ]] && pass utun-name-valid
+          UTUN="$(sudo cat "$NAME" | tr -d '\r\n')"; [[ "$UTUN" =~ ^utun[0-9]+$ ]] && pass utun-name-valid
           kill -0 "$TPID" 2>/dev/null && pass tun2socks-live
           /sbin/ifconfig "$UTUN" >/dev/null && pass utun-created
           sudo /sbin/ifconfig "$UTUN" inet 198.18.0.1 198.18.0.1 up
@@ -93,8 +93,8 @@ jobs:
             cc="$1"; expected="$2"; socks="$3"; D="/tmp/hg-tor/$cc"; rm -rf "$D"; mkdir "$D"; sudo chown _www "$D"
             sudo "$TOR" --User _www --ClientOnly 1 --RunAsDaemon 1 --AvoidDiskWrites 1 --ClientUseIPv6 0 --SocksPort "127.0.0.1:$socks" --DNSPort 127.0.0.1:53 --DataDirectory "$D" --GeoIPFile "$GEO" --GeoIPv6File "$GEO6" --ExitNodes "{$cc}" --StrictNodes 1 --PidFile "$D/tor.pid" --Log "notice file $D/tor.log" >/dev/null 2>&1
             for i in $(seq 1 150); do grep -q 'Bootstrapped 100%' "$D/tor.log" 2>/dev/null && break; sleep 1; done
-            test -s "$D/tor.pid"; P="$(cat "$D/tor.pid")"; kill -0 "$P" 2>/dev/null && pass "$cc-process"
-            grep -q 'Bootstrapped 100%' "$D/tor.log" && pass "$cc-bootstrap"
+            test -s "$D/tor.pid"; P="$(sudo cat "$D/tor.pid")"; kill -0 "$P" 2>/dev/null && pass "$cc-process"
+            sudo grep -q 'Bootstrapped 100%' "$D/tor.log" && pass "$cc-bootstrap"
             /usr/sbin/lsof -nP -a -p "$P" -iTCP:"$socks" -sTCP:LISTEN >/dev/null && pass "$cc-socks"
             /usr/sbin/lsof -nP -a -p "$P" -iUDP:53 >/dev/null && pass "$cc-dns53"
             TARGET="$(/usr/bin/dig +time=3 +tries=1 +short @127.0.0.1 -p 53 lowgas.vercel.app A | grep -E '^[0-9]+(\.[0-9]+){3}$' | head -1)"; test -n "$TARGET" && pass "$cc-dns-query"
@@ -105,7 +105,7 @@ jobs:
             NAME="/tmp/hg-utun-$cc"; rm -f "$NAME"
             sudo /usr/bin/env WG_TUN_NAME_FILE="$NAME" "$TUN" --device utun --proxy "socks5://127.0.0.1:$socks" --loglevel error >"/tmp/t2s-$cc.log" 2>&1 & TP=$!
             for i in $(seq 1 50); do test -s "$NAME" && break; kill -0 "$TP" 2>/dev/null || { cat "/tmp/t2s-$cc.log"; exit 1; }; sleep .2; done
-            test -s "$NAME" && pass "$cc-utun-name"; U="$(tr -d '\r\n' < "$NAME")"; [[ "$U" =~ ^utun[0-9]+$ ]] && pass "$cc-utun-valid"
+            test -s "$NAME" && pass "$cc-utun-name"; U="$(sudo cat "$NAME" | tr -d '\r\n')"; [[ "$U" =~ ^utun[0-9]+$ ]] && pass "$cc-utun-valid"
             kill -0 "$TP" 2>/dev/null && pass "$cc-tun-process"; /sbin/ifconfig "$U" >/dev/null && pass "$cc-utun-live"
             sudo /sbin/ifconfig "$U" inet 198.18.0.1 198.18.0.1 up; sudo /sbin/route -q -n add -host "$TARGET" -interface "$U"
             /sbin/route -n get "$TARGET" | grep -q "interface: $U" && pass "$cc-target-route"
