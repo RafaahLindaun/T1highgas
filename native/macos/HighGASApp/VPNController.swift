@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import Foundation
 import NetworkExtension
 
@@ -17,12 +18,6 @@ final class VPNController: ObservableObject {
 
     var isConnected: Bool { vpnStatus == .connected }
     var canToggle: Bool { !isWorking && vpnStatus != .connecting && vpnStatus != .disconnecting }
-
-    deinit {
-        if let statusObserver {
-            NotificationCenter.default.removeObserver(statusObserver)
-        }
-    }
 
     func bootstrap() async {
         guard !didBootstrap else { return }
@@ -283,9 +278,9 @@ enum ProfileSanityCheck {
             let line = rawLine.split(separator: "#", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? ""
             let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
             guard let separator = trimmed.firstIndex(of: "=") else { continue }
-            let key = trimmed[..<separator].trimmingCharacters(in: .whitespacesAndNewlines)
+            let key = String(trimmed[..<separator]).trimmingCharacters(in: .whitespacesAndNewlines)
             if key.caseInsensitiveCompare("Endpoint") == .orderedSame {
-                return trimmed[trimmed.index(after: separator)...].trimmingCharacters(in: .whitespacesAndNewlines)
+                return String(trimmed[trimmed.index(after: separator)...]).trimmingCharacters(in: .whitespacesAndNewlines)
             }
         }
         return nil
