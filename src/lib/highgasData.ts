@@ -68,27 +68,19 @@ export const fallbackServers: VpnServer[] = [
   },
 ];
 
-const NEON_DATA_API =
-  "https://ep-misty-truth-acysx2u9.apirest.sa-east-1.aws.neon.tech/highgas/rest/v1";
-
 export async function loadVpnServers(): Promise<{
   servers: VpnServer[];
   source: "supabase" | "fallback";
 }> {
-  const endpoint =
-    `${NEON_DATA_API}/highgas_servers` +
-    "?select=id,code,country_code,country_name,city,protocol,status,is_recommended,sort_order" +
-    "&is_active=eq.true&order=sort_order.asc";
-
   try {
-    const response = await fetch(endpoint, {
+    const response = await fetch("/api/servers", {
       method: "GET",
       headers: { Accept: "application/json" },
       cache: "no-store",
     });
 
     if (!response.ok) {
-      throw new Error(`Neon Data API respondeu ${response.status}`);
+      throw new Error(`HighGAS catalog respondeu ${response.status}`);
     }
 
     const data = (await response.json()) as VpnServer[];
@@ -100,8 +92,7 @@ export async function loadVpnServers(): Promise<{
         typeof server.code === "string"
     );
 
-    // "supabase" is kept only as a backwards-compatible internal cloud flag
-    // for App.tsx. The live backend is Neon.
+    // Kept only as a backwards-compatible internal "cloud" flag for App.tsx.
     return usable.length
       ? { servers: usable, source: "supabase" }
       : { servers: fallbackServers, source: "fallback" };
