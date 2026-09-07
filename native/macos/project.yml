@@ -7,8 +7,7 @@ options:
 
 packages:
   WireGuardApple:
-    url: https://github.com/WireGuard/wireguard-apple
-    branch: master
+    path: .build/wireguard-apple
 
 targets:
   WireGuardGoBridgeMac:
@@ -17,7 +16,7 @@ targets:
     legacy:
       toolPath: /bin/zsh
       arguments: >-
-        -lc 'WG_GO_DIR="$(dirname "$(dirname "$BUILD_DIR")")/SourcePackages/checkouts/wireguard-apple/Sources/WireGuardKitGo"; test -d "$WG_GO_DIR" || { echo "WireGuard checkout não encontrado: $WG_GO_DIR"; exit 1; }; cd "$WG_GO_DIR"; exec /usr/bin/make'
+        -lc 'WG_GO_DIR="$SRCROOT/.build/wireguard-apple/Sources/WireGuardKitGo"; test -d "$WG_GO_DIR" || { echo "WireGuard checkout não encontrado: $WG_GO_DIR"; exit 1; }; cd "$WG_GO_DIR"; exec /usr/bin/make'
       passSettings: true
       workingDirectory: $(SRCROOT)
 
