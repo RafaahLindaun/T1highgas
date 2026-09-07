@@ -19,8 +19,11 @@ export default async function handler(req, res) {
 
     if (!response.ok) {
       const detail = await response.text();
-      console.error("HighGAS Neon catalog error", response.status, detail);
-      return res.status(502).json({ error: "Catalog unavailable" });
+      return res.status(502).json({
+        error: "Catalog unavailable",
+        upstreamStatus: response.status,
+        upstreamDetail: detail.slice(0, 1000),
+      });
     }
 
     const servers = await response.json();
@@ -28,7 +31,9 @@ export default async function handler(req, res) {
     res.setHeader("Cache-Control", "public, s-maxage=60, stale-while-revalidate=300");
     return res.status(200).json(Array.isArray(servers) ? servers : []);
   } catch (error) {
-    console.error("HighGAS catalog request failed", error);
-    return res.status(502).json({ error: "Catalog unavailable" });
+    return res.status(502).json({
+      error: "Catalog unavailable",
+      requestError: error instanceof Error ? error.message : String(error),
+    });
   }
 }
