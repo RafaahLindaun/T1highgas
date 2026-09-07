@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -17,7 +20,7 @@ import (
 )
 
 const (
-	version = "0.1.0"
+	version       = "0.2.0"
 	listenAddress = "127.0.0.1:37654"
 	servicePrefix = "HighGAS "
 )
@@ -26,20 +29,25 @@ type serverRequest struct {
 	Server string `json:"server"`
 }
 
-type serviceStatus struct {
+type profileRequest struct {
 	Server string `json:"server"`
-	Name string `json:"name"`
-	State string `json:"state"`
-	Connected bool `json:"connected"`
+	Config string `json:"config"`
+}
+
+type serviceStatus struct {
+	Server    string `json:"server"`
+	Name      string `json:"name"`
+	State     string `json:"state"`
+	Connected bool   `json:"connected"`
 }
 
 type statusResponse struct {
-	Helper bool `json:"helper"`
-	Version string `json:"version"`
-	Connected bool `json:"connected"`
-	ActiveServer string `json:"activeServer,omitempty"`
-	Services []serviceStatus `json:"services"`
-	CheckedAt string `json:"checkedAt"`
+	Helper       bool            `json:"helper"`
+	Version      string          `json:"version"`
+	Connected    bool            `json:"connected"`
+	ActiveServer string          `json:"activeServer,omitempty"`
+	Services     []serviceStatus `json:"services"`
+	CheckedAt    string          `json:"checkedAt"`
 }
 
 type app struct {
@@ -47,8 +55,9 @@ type app struct {
 }
 
 var (
-	serverCodePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{1,39}$`)
-	serviceLinePattern = regexp.MustCompile(`\(([^)]+)\).*"([^"]+)"`)
+	serverCodePattern      = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{1,39}$`)
+	serviceLinePattern     = regexp.MustCompile(`\(([^)]+)\).*"([^"]+)"`)
+	configEndpointPattern  = regexp.MustCompile(`(?mi)^\s*Endpoint\s*=\s*([^\s#;]+)\s*$`)
 )
 
 func main() {
@@ -75,14 +84,15 @@ func main() {
 	mux.HandleFunc("/v1/status", a.auth(a.status))
 	mux.HandleFunc("/v1/connect", a.auth(a.connect))
 	mux.HandleFunc("/v1/disconnect", a.auth(a.disconnect))
+	mux.HandleFunc("/v1/install-profile", a.auth(a.installProfile))
 
 	server := &http.Server{
-		Addr: listenAddress,
-		Handler: a.cors(mux),
+		Addr:              listenAddress,
+		Handler:           a.cors(mux),
 		ReadHeaderTimeout: 3 * time.Second,
-		ReadTimeout: 6 * time.Second,
-		WriteTimeout: 12 * time.Second,
-		IdleTimeout: 30 * time.Second,
+		ReadTimeout:       8 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       30 * time.Second,
 	}
 
 	log.Printf("HighGAS helper %s listening on http://%s", version, listenAddress)
@@ -253,6 +263,77 @@ func (a *app) disconnect(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "stopped": stopped})
 }
 
+func (a *app) installProfile(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method_not_allowed"})
+		return
+	}
+
+	var req profileRequest
+	decoder := json.NewDecoder(io.LimitReader(r.Body, 96*1024))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid_request"})
+		return
+	}
+	req.Server = strings.TrimSpace(strings.ToLower(req.Server))
+	if !serverCodePattern.MatchString(req.Server) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid_server"})
+		return
+	}
+	if err := validateWireGuardConfig(req.Config); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid_wireguard_config", "detail": err.Error()})
+		return
+	}
+
+	endpointMatch := configEndpointPattern.FindStringSubmatch(req.Config)
+	if len(endpointMatch) != 2 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "missing_endpoint"})
+		return
+	}
+
+	profile, err := buildMobileConfig(req.Server, req.Config, endpointMatch[1])
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "profile_build_failed"})
+		return
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "home_unavailable"})
+		return
+	}
+	profileDir := filepath.Join(home, "Library", "Application Support", "HighGAS", "profiles")
+	if err := os.MkdirAll(profileDir, 0700); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "profile_dir_failed"})
+		return
+	}
+	profilePath := filepath.Join(profileDir, req.Server+".mobileconfig")
+	if err := os.WriteFile(profilePath, []byte(profile), 0600); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "profile_write_failed"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if out, err := exec.CommandContext(ctx, "/usr/bin/open", profilePath).CombinedOutput(); err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "error": "profile_open_failed", "detail": strings.TrimSpace(string(out))})
+		return
+	}
+
+	go func(path string) {
+		time.Sleep(5 * time.Minute)
+		_ = os.Remove(path)
+	}(profilePath)
+
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"ok":      true,
+		"server":  req.Server,
+		"name":    servicePrefix + req.Server,
+		"state":   "awaiting_system_install",
+	})
+}
+
 func decodeServerRequest(r *http.Request) (serverRequest, error) {
 	var req serverRequest
 	decoder := json.NewDecoder(io.LimitReader(r.Body, 8192))
@@ -265,6 +346,87 @@ func decodeServerRequest(r *http.Request) (serverRequest, error) {
 		return req, errors.New("invalid server")
 	}
 	return req, nil
+}
+
+func validateWireGuardConfig(config string) error {
+	if len(config) == 0 || len(config) > 64*1024 {
+		return errors.New("config size is invalid")
+	}
+	required := []string{"[Interface]", "[Peer]", "PrivateKey", "PublicKey", "Endpoint", "AllowedIPs"}
+	lower := strings.ToLower(config)
+	for _, item := range required {
+		if !strings.Contains(lower, strings.ToLower(item)) {
+			return fmt.Errorf("missing %s", item)
+		}
+	}
+	return nil
+}
+
+func buildMobileConfig(server, config, endpoint string) (string, error) {
+	profileUUID, err := newUUID()
+	if err != nil {
+		return "", err
+	}
+	vpnUUID, err := newUUID()
+	if err != nil {
+		return "", err
+	}
+	name := servicePrefix + server
+	identifier := "app.highgas.vpn." + server
+
+	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>PayloadContent</key>
+  <array>
+    <dict>
+      <key>PayloadDisplayName</key><string>%s</string>
+      <key>PayloadIdentifier</key><string>%s.tunnel</string>
+      <key>PayloadType</key><string>com.apple.vpn.managed</string>
+      <key>PayloadUUID</key><string>%s</string>
+      <key>PayloadVersion</key><integer>1</integer>
+      <key>UserDefinedName</key><string>%s</string>
+      <key>VPNType</key><string>VPN</string>
+      <key>VPNSubType</key><string>com.wireguard.macos</string>
+      <key>VendorConfig</key>
+      <dict>
+        <key>WgQuickConfig</key><string>%s</string>
+      </dict>
+      <key>VPN</key>
+      <dict>
+        <key>RemoteAddress</key><string>%s</string>
+        <key>AuthenticationMethod</key><string>Password</string>
+      </dict>
+    </dict>
+  </array>
+  <key>PayloadDisplayName</key><string>%s</string>
+  <key>PayloadIdentifier</key><string>%s.profile</string>
+  <key>PayloadOrganization</key><string>HighGAS</string>
+  <key>PayloadRemovalDisallowed</key><false/>
+  <key>PayloadType</key><string>Configuration</string>
+  <key>PayloadUUID</key><string>%s</string>
+  <key>PayloadVersion</key><integer>1</integer>
+</dict>
+</plist>
+`, xmlEscape(name), identifier, vpnUUID, xmlEscape(name), xmlEscape(config), xmlEscape(endpoint), xmlEscape(name), identifier, profileUUID), nil
+}
+
+func xmlEscape(value string) string {
+	var buffer bytes.Buffer
+	_ = xml.EscapeText(&buffer, []byte(value))
+	return buffer.String()
+}
+
+func newUUID() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
 }
 
 func listHighGASServices() ([]serviceStatus, error) {
@@ -291,9 +453,9 @@ func listHighGASServices() ([]serviceStatus, error) {
 		}
 		server := strings.TrimPrefix(name, servicePrefix)
 		services = append(services, serviceStatus{
-			Server: server,
-			Name: name,
-			State: state,
+			Server:    server,
+			Name:      name,
+			State:     state,
 			Connected: strings.EqualFold(state, "Connected"),
 		})
 	}
