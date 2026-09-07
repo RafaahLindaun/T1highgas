@@ -11,6 +11,16 @@ packages:
     branch: master
 
 targets:
+  WireGuardGoBridgeMac:
+    type: ""
+    platform: macOS
+    legacy:
+      toolPath: /bin/zsh
+      arguments: >-
+        -lc 'WG_GO_DIR="$(dirname "$(dirname "$BUILD_DIR")")/SourcePackages/checkouts/wireguard-apple/Sources/WireGuardKitGo"; test -d "$WG_GO_DIR" || { echo "WireGuard checkout não encontrado: $WG_GO_DIR"; exit 1; }; cd "$WG_GO_DIR"; exec /usr/bin/make'
+      passSettings: true
+      workingDirectory: $(SRCROOT)
+
   HighGAS:
     type: application
     platform: macOS
@@ -45,30 +55,21 @@ targets:
         SWIFT_VERSION: 5.9
         PRODUCT_NAME: HighGASTunnel
         GENERATE_INFOPLIST_FILE: NO
+        LIBRARY_SEARCH_PATHS: "$(inherited) $(CONFIGURATION_BUILD_DIR)"
     dependencies:
+      - target: WireGuardGoBridgeMac
       - package: WireGuardApple
         product: WireGuardKit
       - sdk: NetworkExtension.framework
       - sdk: Security.framework
-    preBuildScripts:
-      - name: Build WireGuard Go bridge
-        basedOnDependencyAnalysis: false
-        script: |
-          set -euo pipefail
-          WG_GO_DIR="${BUILD_DIR%Build/*}SourcePackages/checkouts/wireguard-apple/Sources/WireGuardKitGo"
-          if [ ! -d "$WG_GO_DIR" ]; then
-            echo "error: WireGuard package checkout not found at $WG_GO_DIR"
-            exit 1
-          fi
-          cd "$WG_GO_DIR"
-          /usr/bin/make
 
 schemes:
   HighGAS:
     build:
       targets:
-        HighGAS: all
+        WireGuardGoBridgeMac: all
         HighGASTunnel: all
+        HighGAS: all
     run:
       config: Debug
     archive:
