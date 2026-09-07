@@ -8,36 +8,45 @@ const fallbackServers = [
   { id: 5, code: "gb-lon-01", country_code: "GB", country_name: "Reino Unido", city: "Londres", protocol: "wireguard", status: "online", is_recommended: false, sort_order: 50 },
 ];
 
+const queryCatalog = async (databaseUrl) => {
+  const sql = neon(databaseUrl);
+  return sql`
+    select
+      id,
+      code,
+      country_code,
+      country_name,
+      city,
+      protocol,
+      status,
+      is_recommended,
+      sort_order
+    from public.highgas_servers
+    where is_active = true
+      and status <> 'offline'
+    order by sort_order asc, id asc
+  `;
+};
+
 export default async function handler(req, res) {
   if (req.method !== "GET") {
     res.setHeader("Allow", "GET");
     return res.status(405).json({ error: "Method not allowed" });
   }
 
-  const databaseUrl = process.env.DATABASE_URL || process.env.POSTGRES_URL;
+  const connectionCandidates = [
+    ["postgres", process.env.POSTGRES_URL],
+    ["database", process.env.DATABASE_URL],
+  ].filter(([, value], index, all) =>
+    Boolean(value) && all.findIndex(([, candidate]) => candidate === value) === index
+  );
 
-  if (databaseUrl) {
+  for (const [source, databaseUrl] of connectionCandidates) {
     try {
-      const sql = neon(databaseUrl);
-      const servers = await sql`
-        select
-          id,
-          code,
-          country_code,
-          country_name,
-          city,
-          protocol,
-          status,
-          is_recommended,
-          sort_order
-        from public.highgas_servers
-        where is_active = true
-          and status <> 'offline'
-        order by sort_order asc, id asc
-      `;
-
+      const servers = await queryCatalog(databaseUrl);
       if (Array.isArray(servers) && servers.length > 0) {
         res.setHeader("X-HighGAS-Source", "neon");
+        res.setHeader("X-HighGAS-Connection", source);
         res.setHeader(
           "Cache-Control",
           "public, s-maxage=60, stale-while-revalidate=300"
@@ -46,7 +55,7 @@ export default async function handler(req, res) {
       }
     } catch (error) {
       console.error(
-        "HighGAS Neon query failed",
+        `HighGAS Neon query failed (${source})`,
         error instanceof Error ? error.message : String(error)
       );
     }
