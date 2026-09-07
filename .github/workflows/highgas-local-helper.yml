@@ -1,0 +1,75 @@
+name: HighGAS Local Helper
+
+on:
+  pull_request:
+    paths:
+      - "local-helper/**"
+      - ".github/workflows/highgas-local-helper.yml"
+  push:
+    branches:
+      - highgas-local-helper
+    paths:
+      - "local-helper/**"
+      - ".github/workflows/highgas-local-helper.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22.x'
+          cache-dependency-path: local-helper/go.mod
+
+      - name: Test build
+        working-directory: local-helper
+        run: |
+          go vet ./...
+          go test ./...
+
+      - name: Build Intel macOS helper
+        working-directory: local-helper
+        env:
+          CGO_ENABLED: 0
+          GOOS: darwin
+          GOARCH: amd64
+        run: go build -trimpath -ldflags='-s -w' -o dist/intel/highgas-helper .
+
+      - name: Build Apple Silicon helper
+        working-directory: local-helper
+        env:
+          CGO_ENABLED: 0
+          GOOS: darwin
+          GOARCH: arm64
+        run: go build -trimpath -ldflags='-s -w' -o dist/apple-silicon/highgas-helper .
+
+      - name: Package installers
+        working-directory: local-helper
+        run: |
+          set -euo pipefail
+          for arch in intel apple-silicon; do
+            cp install.command "dist/$arch/install.command"
+            cp uninstall.command "dist/$arch/uninstall.command"
+            chmod +x "dist/$arch/highgas-helper" "dist/$arch/install.command" "dist/$arch/uninstall.command"
+          done
+
+      - name: Upload Intel package
+        uses: actions/upload-artifact@v4
+        with:
+          name: HighGAS-Helper-macOS-Intel
+          path: local-helper/dist/intel/
+          if-no-files-found: error
+
+      - name: Upload Apple Silicon package
+        uses: actions/upload-artifact@v4
+        with:
+          name: HighGAS-Helper-macOS-Apple-Silicon
+          path: local-helper/dist/apple-silicon/
+          if-no-files-found: error
