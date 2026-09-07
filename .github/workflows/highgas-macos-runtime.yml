@@ -60,10 +60,10 @@ jobs:
           NAME=/tmp/hg-utun; rm -f "$NAME"
           sudo /usr/bin/env WG_TUN_NAME_FILE="$NAME" "$TUN" --device utun --proxy socks5://127.0.0.1:9 --loglevel error >/tmp/t2s.log 2>&1 & TPID=$!
           trap 'sudo kill "$TPID" >/dev/null 2>&1 || true; [[ -n "${UTUN:-}" ]] && sudo /sbin/route -q -n delete -inet 203.0.113.0/24 -interface "$UTUN" >/dev/null 2>&1 || true' EXIT
-          for i in $(seq 1 50); do test -s "$NAME" && break; kill -0 "$TPID" 2>/dev/null || { cat /tmp/t2s.log; exit 1; }; sleep .2; done
+          for i in $(seq 1 50); do test -s "$NAME" && break; sudo kill -0 "$TPID" 2>/dev/null || { cat /tmp/t2s.log; exit 1; }; sleep .2; done
           test -s "$NAME" && pass utun-name-file
           UTUN="$(sudo cat "$NAME" | tr -d '\r\n')"; [[ "$UTUN" =~ ^utun[0-9]+$ ]] && pass utun-name-valid
-          kill -0 "$TPID" 2>/dev/null && pass tun2socks-live
+          sudo kill -0 "$TPID" 2>/dev/null && pass tun2socks-live
           /sbin/ifconfig "$UTUN" >/dev/null && pass utun-created
           sudo /sbin/ifconfig "$UTUN" inet 198.18.0.1 198.18.0.1 up
           /sbin/ifconfig "$UTUN" | grep -q 198.18.0.1 && pass utun-address
@@ -92,11 +92,11 @@ jobs:
           country_test(){
             cc="$1"; expected="$2"; socks="$3"; D="/tmp/hg-tor/$cc"; rm -rf "$D"; mkdir "$D"; sudo chown _www "$D"
             sudo "$TOR" --User _www --ClientOnly 1 --RunAsDaemon 1 --AvoidDiskWrites 1 --ClientUseIPv6 0 --SocksPort "127.0.0.1:$socks" --DNSPort 127.0.0.1:53 --DataDirectory "$D" --GeoIPFile "$GEO" --GeoIPv6File "$GEO6" --ExitNodes "{$cc}" --StrictNodes 1 --PidFile "$D/tor.pid" --Log "notice file $D/tor.log" >/dev/null 2>&1
-            for i in $(seq 1 150); do grep -q 'Bootstrapped 100%' "$D/tor.log" 2>/dev/null && break; sleep 1; done
-            test -s "$D/tor.pid"; P="$(sudo cat "$D/tor.pid")"; kill -0 "$P" 2>/dev/null && pass "$cc-process"
+            for i in $(seq 1 150); do sudo grep -q 'Bootstrapped 100%' "$D/tor.log" 2>/dev/null && break; sleep 1; done
+            test -s "$D/tor.pid"; P="$(sudo cat "$D/tor.pid")"; sudo kill -0 "$P" 2>/dev/null && pass "$cc-process"
             sudo grep -q 'Bootstrapped 100%' "$D/tor.log" && pass "$cc-bootstrap"
-            /usr/sbin/lsof -nP -a -p "$P" -iTCP:"$socks" -sTCP:LISTEN >/dev/null && pass "$cc-socks"
-            /usr/sbin/lsof -nP -a -p "$P" -iUDP:53 >/dev/null && pass "$cc-dns53"
+            sudo /usr/sbin/lsof -nP -a -p "$P" -iTCP:"$socks" -sTCP:LISTEN >/dev/null && pass "$cc-socks"
+            sudo /usr/sbin/lsof -nP -a -p "$P" -iUDP:53 >/dev/null && pass "$cc-dns53"
             TARGET="$(/usr/bin/dig +time=3 +tries=1 +short @127.0.0.1 -p 53 lowgas.vercel.app A | grep -E '^[0-9]+(\.[0-9]+){3}$' | head -1)"; test -n "$TARGET" && pass "$cc-dns-query"
             RAW="$(curl -4 -fsS --socks5-hostname "127.0.0.1:$socks" --connect-timeout 10 --max-time 30 https://lowgas.vercel.app/api/network-info)"
             IP="$(printf '%s' "$RAW" | sed -n 's/.*"ip"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"; CT="$(printf '%s' "$RAW" | sed -n 's/.*"country"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | tr '[:lower:]' '[:upper:]')"
@@ -104,16 +104,16 @@ jobs:
 
             NAME="/tmp/hg-utun-$cc"; rm -f "$NAME"
             sudo /usr/bin/env WG_TUN_NAME_FILE="$NAME" "$TUN" --device utun --proxy "socks5://127.0.0.1:$socks" --loglevel error >"/tmp/t2s-$cc.log" 2>&1 & TP=$!
-            for i in $(seq 1 50); do test -s "$NAME" && break; kill -0 "$TP" 2>/dev/null || { cat "/tmp/t2s-$cc.log"; exit 1; }; sleep .2; done
+            for i in $(seq 1 50); do test -s "$NAME" && break; sudo kill -0 "$TP" 2>/dev/null || { cat "/tmp/t2s-$cc.log"; exit 1; }; sleep .2; done
             test -s "$NAME" && pass "$cc-utun-name"; U="$(sudo cat "$NAME" | tr -d '\r\n')"; [[ "$U" =~ ^utun[0-9]+$ ]] && pass "$cc-utun-valid"
-            kill -0 "$TP" 2>/dev/null && pass "$cc-tun-process"; /sbin/ifconfig "$U" >/dev/null && pass "$cc-utun-live"
+            sudo kill -0 "$TP" 2>/dev/null && pass "$cc-tun-process"; /sbin/ifconfig "$U" >/dev/null && pass "$cc-utun-live"
             sudo /sbin/ifconfig "$U" inet 198.18.0.1 198.18.0.1 up; sudo /sbin/route -q -n add -host "$TARGET" -interface "$U"
             /sbin/route -n get "$TARGET" | grep -q "interface: $U" && pass "$cc-target-route"
             RAW="$(curl -4 -fsS --resolve "lowgas.vercel.app:443:$TARGET" --connect-timeout 10 --max-time 35 https://lowgas.vercel.app/api/network-info)"
             CT="$(printf '%s' "$RAW" | sed -n 's/.*"country"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | tr '[:lower:]' '[:upper:]')"; test "$CT" = "$expected" && pass "$cc-tun-to-tor"
             sudo /sbin/route -q -n delete -host "$TARGET" -interface "$U" >/dev/null 2>&1 || true; sudo kill "$TP" 2>/dev/null || true; wait "$TP" 2>/dev/null || true; sudo kill "$P" 2>/dev/null || true
-            for i in $(seq 1 30); do /usr/sbin/lsof -nP -iUDP:53 >/dev/null 2>&1 || break; sleep .1; done
-            ! /usr/sbin/lsof -nP -iUDP:53 >/dev/null 2>&1 && pass "$cc-cleanup"
+            for i in $(seq 1 30); do sudo /usr/sbin/lsof -nP -iUDP:53 >/dev/null 2>&1 || break; sleep .1; done
+            ! sudo /usr/sbin/lsof -nP -iUDP:53 >/dev/null 2>&1 && pass "$cc-cleanup"
           }
 
           country_test de DE 39150
