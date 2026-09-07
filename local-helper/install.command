@@ -133,7 +133,8 @@ sleep 1
 HEALTH="$(sudo /usr/bin/curl -fsS --max-time 5 --cacert "$CACERT" https://127.0.0.1:37654/v1/health 2>/dev/null || true)"
 if [[ "$HEALTH" == *'"torReady":true'* && "$HEALTH" == *'"controllerReady":true'* ]]; then
   echo "HighGAS Local seguro: WireGuard + Tor + controlador local instalados."
-  /usr/bin/open "$SITE/?highgas-local=1#highgas-helper=$T"
+  PAIR_NONCE="$(/bin/date +%s)-$RANDOM"
+  /usr/bin/open "$SITE/?highgas-local=1&pair=$PAIR_NONCE#highgas-helper=$T"
 else
   echo "O serviço não passou na verificação final. Log: $SYSTEM/helper-error.log"
   echo "Não vou abrir o HighGAS até Tor e controlador local estarem saudáveis."
