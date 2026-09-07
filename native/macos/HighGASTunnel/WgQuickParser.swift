@@ -81,8 +81,11 @@ struct WgQuickParser {
             }
 
             guard let separator = line.firstIndex(of: "=") else { continue }
-            let key = line[..<separator].trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            let value = line[line.index(after: separator)...].trimmingCharacters(in: .whitespacesAndNewlines)
+            let key = String(line[..<separator])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            let value = String(line[line.index(after: separator)...])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
             guard !key.isEmpty, !value.isEmpty else { continue }
 
             switch currentSection {
@@ -169,7 +172,7 @@ struct WgQuickParser {
     private static func csv(_ value: String) -> [String] {
         value
             .split(separator: ",")
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
     }
 }
