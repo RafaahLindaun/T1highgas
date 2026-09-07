@@ -1,0 +1,7 @@
+HighGAS bundles the unmodified Tor Expert Bundle for macOS from the Tor Project.
+
+Pinned bundle: Tor Browser 15.0.21 / tor 0.4.9.11
+Official source: https://www.torproject.org/download/tor/
+
+Tor is free and open-source software. Tor Project is not affiliated with or endorsing HighGAS.
+HighGAS uses Tor only as an optional local transport for the free Germany/United States mode.
