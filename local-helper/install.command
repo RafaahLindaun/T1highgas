@@ -95,8 +95,10 @@ fi
 sudo /usr/sbin/chown -R root:wheel "$SYSTEM"
 sudo /bin/chmod 700 "$SYSTEM" "$SYSTEM/profiles" "$CERTDIR" "$SYSTEM/highgas-helper" "$SYSTEM/highgas-tunnel" "$SYSTEM/highgas-tor" "$SYSTEM/wireguard-go" "$SYSTEM/tun2socks"
 sudo /bin/chmod 644 "$SYSTEM/highgas-local-controller.js"
-sudo /bin/chmod -R u+rwX,go-rwx "$SYSTEM/tor-expert"
-sudo /bin/chmod 700 "$SYSTEM/tor-expert/tor/tor"
+# Tor inicia como root e cai para _www. Binário/GeoIP não têm segredo e precisam continuar legíveis após a queda de privilégio.
+sudo /usr/bin/find "$SYSTEM/tor-expert" -type d -exec /bin/chmod 755 {} +
+sudo /usr/bin/find "$SYSTEM/tor-expert" -type f -exec /bin/chmod 644 {} +
+sudo /bin/chmod 755 "$SYSTEM/tor-expert/tor/tor"
 sudo /bin/chmod 600 "$CAKEY" "$SERVERKEY"
 sudo /bin/chmod 644 "$CACERT" "$SERVERCERT"
 
