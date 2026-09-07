@@ -23,18 +23,19 @@
 
   const request = async (path, options = {}) => {
     if (!token) throw new Error("not_paired");
+    const { timeoutMs = 3000, ...fetchOptions } = options;
     const controller = new AbortController();
-    const timeout = window.setTimeout(() => controller.abort(), 2500);
+    const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
     try {
       const response = await fetch(`${BASE}${path}`, {
-        ...options,
+        ...fetchOptions,
         cache: "no-store",
         signal: controller.signal,
         headers: {
           Accept: "application/json",
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,
-          ...(options.headers || {}),
+          ...(fetchOptions.headers || {}),
         },
       });
       const payload = await response.json().catch(() => ({}));
@@ -108,6 +109,8 @@
     const checkTitle = document.querySelector(".connection-check strong");
     const checkCopy = document.querySelector(".connection-check small");
     const note = document.querySelector(".system-note");
+    const profileTitle = document.querySelector(".profile-cta strong");
+    const profileCopy = document.querySelector(".profile-cta small");
 
     setPhaseClass(powerCard, "power-card--", phase);
     setPhaseClass(powerButton, "power-button--", phase);
@@ -136,6 +139,8 @@
         ? "O helper controla o túnel diretamente no macOS e continua ativo em segundo plano."
         : "Toque em Ligar VPN. Não é necessário abrir o WireGuard.");
     }
+    if (profileTitle) profileTitle.textContent = "Instalar perfil HighGAS";
+    if (profileCopy) profileCopy.textContent = "Escolha o .conf uma vez; a instalação acontece localmente no macOS.";
     if (note) {
       note.textContent = "HighGAS Local controla a VPN diretamente no macOS. O WireGuard pode permanecer fechado.";
     }
@@ -150,7 +155,7 @@
     try {
       const result = await request("/v1/status", { method: "GET" });
       helperAvailable = true;
-      lastError = "";
+      if (lastError === "Conexão solicitada. Confirmando o túnel…") lastError = "";
       const wasConnected = connected;
       connected = Boolean(result.connected);
       activeServer = result.activeServer || "";
@@ -176,7 +181,7 @@
       window.setTimeout(() => void refresh(), 2200);
     } catch (error) {
       if (error && error.status === 409) {
-        lastError = "O perfil deste país ainda não está instalado neste Mac. Faça a configuração inicial uma única vez.";
+        lastError = "O perfil deste país ainda não está instalado. Clique em Adicionar perfil e confirme a instalação uma única vez.";
       } else {
         lastError = "Não consegui acionar o helper agora. Ele continuará tentando em segundo plano.";
       }
@@ -202,6 +207,41 @@
     paint();
   };
 
+  const installProfile = async (file) => {
+    if (!file || !helperAvailable) return;
+    if (file.size > 64 * 1024) {
+      lastError = "Esse arquivo é grande demais para um perfil WireGuard.";
+      paint();
+      return;
+    }
+
+    const config = await file.text();
+    if (!/\[Interface\]/i.test(config) || !/\[Peer\]/i.test(config) || !/PrivateKey\s*=/i.test(config)) {
+      lastError = "Esse arquivo não parece um perfil WireGuard válido.";
+      paint();
+      return;
+    }
+
+    const server = (localStorage.getItem(SERVER_KEY) || "br-sao-01").toLowerCase();
+    lastError = "Preparando a instalação segura no macOS…";
+    paint();
+    try {
+      await request("/v1/install-profile", {
+        method: "POST",
+        timeoutMs: 8000,
+        body: JSON.stringify({ server, config }),
+      });
+      lastError = "O macOS abriu o perfil HighGAS. Confirme Instalar uma única vez; depois o botão Ligar/Desligar fica automático.";
+      window.setTimeout(() => void refresh(), 2500);
+      window.setTimeout(() => void refresh(), 7000);
+    } catch (error) {
+      lastError = error && error.message === "invalid_wireguard_config"
+        ? "O perfil WireGuard está incompleto."
+        : "Não consegui abrir a instalação do perfil no macOS.";
+    }
+    paint();
+  };
+
   document.addEventListener("click", (event) => {
     const target = event.target instanceof Element ? event.target.closest(".power-button") : null;
     if (!target || !helperAvailable || !token) return;
@@ -211,6 +251,14 @@
     void (connected ? disconnect() : connect());
   }, true);
 
+  document.addEventListener("change", (event) => {
+    const input = event.target;
+    if (!(input instanceof HTMLInputElement) || input.type !== "file" || !helperAvailable || !token) return;
+    const file = input.files && input.files[0];
+    if (!file || !file.name.toLowerCase().endsWith(".conf")) return;
+    void installProfile(file);
+  }, true);
+
   const observer = new MutationObserver(() => paint());
   observer.observe(document.documentElement, { childList: true, subtree: true });
 
@@ -218,6 +266,7 @@
     refresh,
     connect,
     disconnect,
+    installProfile,
     forgetPairing() {
       localStorage.removeItem(TOKEN_KEY);
       token = "";
@@ -228,8 +277,7 @@
 
   void refresh();
   window.setInterval(() => {
-    if (helperAvailable) void refresh();
-    else if (token) void refresh();
+    if (token) void refresh();
   }, 4000);
   window.setInterval(() => {
     if (connected) paint();
