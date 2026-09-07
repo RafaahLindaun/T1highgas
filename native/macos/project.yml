@@ -1,0 +1,75 @@
+name: HighGAS
+
+options:
+  bundleIdPrefix: app.highgas
+  deploymentTarget:
+    macOS: "13.0"
+
+packages:
+  WireGuardApple:
+    url: https://github.com/WireGuard/wireguard-apple
+    branch: master
+
+targets:
+  HighGAS:
+    type: application
+    platform: macOS
+    sources:
+      - path: HighGASApp
+      - path: Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.highgas.macos
+        INFOPLIST_FILE: HighGASApp/Info.plist
+        CODE_SIGN_ENTITLEMENTS: HighGASApp/HighGASApp.entitlements
+        SWIFT_VERSION: 5.9
+        PRODUCT_NAME: HighGAS
+        GENERATE_INFOPLIST_FILE: NO
+    dependencies:
+      - target: HighGASTunnel
+        embed: true
+      - sdk: NetworkExtension.framework
+      - sdk: Security.framework
+
+  HighGASTunnel:
+    type: app-extension
+    platform: macOS
+    sources:
+      - path: HighGASTunnel
+      - path: Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.highgas.macos.tunnel
+        INFOPLIST_FILE: HighGASTunnel/Info.plist
+        CODE_SIGN_ENTITLEMENTS: HighGASTunnel/HighGASTunnel.entitlements
+        SWIFT_VERSION: 5.9
+        PRODUCT_NAME: HighGASTunnel
+        GENERATE_INFOPLIST_FILE: NO
+    dependencies:
+      - package: WireGuardApple
+        product: WireGuardKit
+      - sdk: NetworkExtension.framework
+      - sdk: Security.framework
+    preBuildScripts:
+      - name: Build WireGuard Go bridge
+        basedOnDependencyAnalysis: false
+        script: |
+          set -euo pipefail
+          WG_GO_DIR="${BUILD_DIR%Build/*}SourcePackages/checkouts/wireguard-apple/Sources/WireGuardKitGo"
+          if [ ! -d "$WG_GO_DIR" ]; then
+            echo "error: WireGuard package checkout not found at $WG_GO_DIR"
+            exit 1
+          fi
+          cd "$WG_GO_DIR"
+          /usr/bin/make
+
+schemes:
+  HighGAS:
+    build:
+      targets:
+        HighGAS: all
+        HighGASTunnel: all
+    run:
+      config: Debug
+    archive:
+      config: Release
