@@ -4,13 +4,16 @@ on:
   pull_request:
     paths:
       - "local-helper/**"
+      - "public/highgas-local-controller.js"
       - ".github/workflows/highgas-local-helper.yml"
   push:
     branches:
       - highgas-wireguard-cli
       - highgas-tor-free
+      - highgas-tor-local-assets
     paths:
       - "local-helper/**"
+      - "public/highgas-local-controller.js"
       - ".github/workflows/highgas-local-helper.yml"
   workflow_dispatch:
 
@@ -85,7 +88,7 @@ jobs:
             arch="$2"
             (cd local-helper && CGO_ENABLED=0 GOOS=darwin GOARCH="$arch" go build -trimpath -ldflags='-s -w' -o "dist/$out/highgas-helper" ./cli)
             (cd /tmp/wireguard-go && CGO_ENABLED=0 GOOS=darwin GOARCH="$arch" go build -trimpath -ldflags='-s -w' -o "$GITHUB_WORKSPACE/local-helper/dist/$out/wireguard-go" .)
-            cp local-helper/highgas-tunnel local-helper/highgas-tor local-helper/install.command local-helper/uninstall.command local-helper/TOR-NOTICE.txt "local-helper/dist/$out/"
+            cp local-helper/highgas-tunnel local-helper/highgas-tor local-helper/install.command local-helper/uninstall.command local-helper/TOR-NOTICE.txt public/highgas-local-controller.js "local-helper/dist/$out/"
             mkdir -p "local-helper/dist/$out/tor-expert"
             cp -R "/tmp/tor-expert/$out/." "local-helper/dist/$out/tor-expert/"
             chmod +x "local-helper/dist/$out/"{highgas-helper,wireguard-go,highgas-tunnel,highgas-tor,install.command,uninstall.command}
@@ -98,6 +101,7 @@ jobs:
           grep -q '^#!/bin/zsh' local-helper/highgas-tor
           grep -q 'tor-expert' local-helper/install.command
           grep -q 'highgas-tor' local-helper/install.command
+          grep -q 'DEFAULT_TOR_SERVERS' local-helper/dist/intel/highgas-local-controller.js
           test -x local-helper/dist/intel/tor-expert/tor/tor
           test -f local-helper/dist/intel/tor-expert/data/geoip
           test -x local-helper/dist/apple-silicon/tor-expert/tor/tor
