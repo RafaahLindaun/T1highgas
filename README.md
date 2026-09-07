@@ -1,73 +1,46 @@
-# React + TypeScript + Vite
+# HighGAS VPN
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+HighGAS é um frontend pessoal, sem login, feito em React + Vite para organizar uma configuração VPN baseada em WireGuard.
 
-Currently, two official plugins are available:
+## O que esta versão faz
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+- interface responsiva para celular, Mac e PC;
+- seleção de país/servidor;
+- importação local de perfil WireGuard `.conf`;
+- o conteúdo do perfil fica apenas na memória do navegador e não é enviado ao Supabase;
+- diagnóstico de IP/país pela rota `/api/network-info`;
+- catálogo de servidores vindo de um projeto Supabase separado;
+- fallback local para o site continuar utilizável se o Supabase estiver indisponível;
+- sem autenticação e sem dependência do backend antigo do repositório.
 
-## React Compiler
+## Limite técnico importante
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+Um navegador não pode criar um túnel VPN de sistema por conta própria. O HighGAS organiza o perfil e verifica a saída, enquanto o túnel real é ativado no aplicativo WireGuard do sistema operacional.
 
-## Expanding the ESLint configuration
+## Supabase
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+Crie um projeto Supabase separado e aplique `supabase/highgas.sql`.
 
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
+Depois configure:
 
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```env
+VITE_HIGHGAS_SUPABASE_URL=https://SEU-PROJETO.supabase.co
+VITE_HIGHGAS_SUPABASE_PUBLISHABLE_KEY=sb_publishable_xxxxxxxxxxxxxxxxx
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+A tabela `highgas_servers` é pública somente para leitura e usa RLS. Não armazene chaves privadas, perfis `.conf` ou segredos na tabela.
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+## Desenvolvimento
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+npm install
+npm run dev
 ```
+
+## Build
+
+```bash
+npm run build
+```
+
+O frontend foi mantido propositalmente pequeno para reduzir pontos de falha.
