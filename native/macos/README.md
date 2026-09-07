@@ -64,7 +64,7 @@ Na primeira instalação o macOS pode pedir autorização para adicionar uma con
 
 ## WireGuardKit
 
-O projeto usa o pacote `WireGuard/wireguard-apple` e seu produto `WireGuardKit`. O `project.yml` inclui uma fase que compila automaticamente o bridge Go exigido pelo WireGuardKit, evitando a criação manual do target externo descrito no projeto upstream.
+O projeto usa o pacote `WireGuard/wireguard-apple` e seu produto `WireGuardKit`. O `project.yml` gera automaticamente o target externo `WireGuardGoBridgeMac`, que executa o `make` do bridge Go antes do túnel, seguindo a arquitetura recomendada pelo projeto upstream sem exigir que esse target seja criado manualmente no Xcode.
 
 ## Segurança do perfil
 
