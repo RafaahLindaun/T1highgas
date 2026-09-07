@@ -1,0 +1,29 @@
+name: HighGAS Self-hosted
+
+on:
+  pull_request:
+    paths:
+      - "selfhosted/**"
+      - ".github/workflows/highgas-selfhosted.yml"
+  push:
+    branches:
+      - highgas-selfhosted
+    paths:
+      - "selfhosted/**"
+      - ".github/workflows/highgas-selfhosted.yml"
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate shell syntax
+        run: |
+          bash -n selfhosted/install-server.sh
+          bash -n selfhosted/add-client.sh
+          bash -n selfhosted/remove-client.sh
+          bash -n selfhosted/status.sh
+      - name: Verify no generated secrets are tracked
+        run: |
+          ! grep -R --line-number -E '^(PrivateKey|PresharedKey) = [A-Za-z0-9+/=]{20,}$' selfhosted
