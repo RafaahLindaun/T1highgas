@@ -1,0 +1,64 @@
+#!/bin/zsh
+set -euo pipefail
+export LC_ALL=C
+BASE="/Library/Application Support/HighGAS"
+PROFILES="$BASE/profiles"
+WG="$BASE/wireguard-go"
+STATE="/var/run/highgas/state"
+NAMEFILE="/var/run/highgas/utun-name"
+mkdir -p /var/run/highgas /var/run/wireguard
+
+val(){ /usr/bin/awk -v want="$1" -v wantsec="$2" '
+  /^[[:space:]]*\[/ { s=$0; gsub(/[[:space:]\[\]]/,"",s); next }
+  s==wantsec && index($0,"=") { k=$0; sub(/=.*/,"",k); gsub(/[[:space:]]/,"",k); if(tolower(k)==tolower(want)){v=$0;sub(/^[^=]*=/,"",v);sub(/[;#].*$/,"",v);gsub(/^[[:space:]]+|[[:space:]]+$/,"",v);print v;exit} }
+' "$CONF"; }
+state(){ /usr/bin/awk -F= -v k="$1" '$1==k{sub(/^[^=]*=/,"");print;exit}' "$STATE" 2>/dev/null || true; }
+hexkey(){ printf '%s' "$1" | /usr/bin/base64 -D 2>/dev/null | /usr/bin/hexdump -ve '1/1 "%02x"'; }
+service_for(){ /usr/sbin/networksetup -listnetworkserviceorder | /usr/bin/awk -v dev="$1" '
+  /^\([0-9]+\) / {svc=$0;sub(/^\([0-9]+\) /,"",svc)} index($0,"Device: "dev") {sub(/^\*/,"",svc);print svc;exit}' ; }
+resolve4(){ if [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then print -r -- "$1"; else /usr/bin/dscacheutil -q host -a name "$1" | /usr/bin/awk '/ip_address:/{if($2 !~ /:/){print $2;exit}}'; fi; }
+
+down(){
+ [[ -f "$STATE" ]] || { print "disconnected"; return 0; }
+ local iface pid endpoint service olddns routes r
+ iface="$(state IFACE)"; pid="$(state PID)"; endpoint="$(state ENDPOINT)"; service="$(state SERVICE)"; olddns="$(state OLDDNS)"; routes="$(state ROUTES)"
+ if [[ -n "$service" ]]; then
+   if [[ -z "$olddns" || "$olddns" == Empty ]]; then /usr/sbin/networksetup -setdnsservers "$service" Empty >/dev/null 2>&1 || true
+   else local -a d; d=( ${(s:,:)olddns} ); /usr/sbin/networksetup -setdnsservers "$service" "${d[@]}" >/dev/null 2>&1 || true; fi
+ fi
+ if [[ -n "$routes" ]]; then local -a rr; rr=( ${(s:,:)routes} ); for r in "${rr[@]}"; do /sbin/route -q -n delete -inet "$r" >/dev/null 2>&1 || true; done; fi
+ [[ -n "$endpoint" ]] && /sbin/route -q -n delete -inet "$endpoint" >/dev/null 2>&1 || true
+ [[ -n "$iface" ]] && /bin/rm -f "/var/run/wireguard/$iface.sock" >/dev/null 2>&1 || true
+ if [[ -n "$pid" ]]; then /bin/kill "$pid" >/dev/null 2>&1 || true; sleep 0.2; /bin/kill -9 "$pid" >/dev/null 2>&1 || true; fi
+ /bin/rm -f "$STATE" "$NAMEFILE"; /usr/bin/killall -HUP mDNSResponder >/dev/null 2>&1 || true
+ print "disconnected"
+}
+
+up(){
+ local server="$1"; CONF="$PROFILES/$server.conf"; [[ -r "$CONF" && -x "$WG" ]] || { print -u2 "profile or WireGuard engine missing"; return 2; }
+ down >/dev/null 2>&1 || true
+ local priv pub psk endpoint allowed address dns mtu keep host port ip gw dev svc olddns pid iface resp routes=""
+ priv="$(val PrivateKey Interface)"; address="$(val Address Interface)"; dns="$(val DNS Interface)"; mtu="$(val MTU Interface)"; pub="$(val PublicKey Peer)"; psk="$(val PresharedKey Peer)"; endpoint="$(val Endpoint Peer)"; allowed="$(val AllowedIPs Peer)"; keep="$(val PersistentKeepalive Peer)"
+ address="${address%%,*}"; address="${address//[[:space:]]/}"; [[ "$address" == *.*/* ]] || { print -u2 "IPv4 Address missing"; return 3; }
+ [[ -n "$priv" && -n "$pub" && -n "$endpoint" && -n "$allowed" ]] || { print -u2 "incomplete WireGuard profile"; return 3; }
+ host="${endpoint%:*}"; port="${endpoint##*:}"; [[ "$host" != "$endpoint" && "$port" =~ ^[0-9]+$ ]] || { print -u2 "IPv4 host:port endpoint required"; return 3; }
+ ip="$(resolve4 "$host")"; [[ -n "$ip" ]] || { print -u2 "endpoint DNS failed"; return 4; }
+ local routeinfo; routeinfo="$(/sbin/route -n get default)"; gw="$(print -r -- "$routeinfo"|/usr/bin/awk '/gateway:/{print $2;exit}')"; dev="$(print -r -- "$routeinfo"|/usr/bin/awk '/interface:/{print $2;exit}')"; [[ -n "$gw" && -n "$dev" ]] || return 4
+ svc="$(service_for "$dev")"; olddns="Empty"; if [[ -n "$svc" ]]; then olddns="$(/usr/sbin/networksetup -getdnsservers "$svc" 2>/dev/null || true)"; [[ "$olddns" == *" "* ]] && olddns=Empty; olddns="${olddns//$'\n'/,}"; fi
+ /bin/rm -f "$NAMEFILE"; WG_TUN_NAME_FILE="$NAMEFILE" LOG_LEVEL=error "$WG" -f utun >>"$BASE/wireguard.log" 2>&1 & pid=$!
+ for i in {1..50}; do [[ -s "$NAMEFILE" ]] && break; sleep 0.1; done; iface="$(cat "$NAMEFILE" 2>/dev/null || true)"; [[ "$iface" =~ ^utun[0-9]+$ ]] || { /bin/kill "$pid" 2>/dev/null||true; print -u2 "utun creation failed"; return 5; }
+ for i in {1..50}; do [[ -S "/var/run/wireguard/$iface.sock" ]] && break; sleep 0.1; done; [[ -S "/var/run/wireguard/$iface.sock" ]] || { /bin/kill "$pid" 2>/dev/null||true; print -u2 "WireGuard UAPI unavailable"; return 5; }
+ local ph puh psh=""; ph="$(hexkey "$priv")"; puh="$(hexkey "$pub")"; [[ ${#ph} -eq 64 && ${#puh} -eq 64 ]] || return 3; [[ -n "$psk" ]] && psh="$(hexkey "$psk")"
+ { print "set=1"; print "private_key=$ph"; print "replace_peers=true"; print "public_key=$puh"; [[ -n "$psh" ]] && print "preshared_key=$psh"; print "endpoint=$ip:$port"; print "replace_allowed_ips=true"; local -a aa; aa=( ${(s:,:)allowed} ); local a; for a in "${aa[@]}"; do a="${a//[[:space:]]/}"; print "allowed_ip=$a"; done; [[ -n "$keep" ]] && print "persistent_keepalive_interval=$keep"; print; } | /usr/bin/nc -U -w 2 "/var/run/wireguard/$iface.sock" > /var/run/highgas/uapi.out 2>/dev/null || true
+ resp="$(cat /var/run/highgas/uapi.out 2>/dev/null || true)"; [[ "$resp" == *"errno=0"* ]] || { down >/dev/null 2>&1||true; print -u2 "WireGuard rejected profile: $resp"; return 6; }
+ /sbin/ifconfig "$iface" inet "$address" "${address%%/*}" alias; /sbin/ifconfig "$iface" mtu "${mtu:-1420}" up
+ /sbin/route -q -n add -inet "$ip" -gateway "$gw" >/dev/null 2>&1 || true
+ local -a aa; aa=( ${(s:,:)allowed} ); local a; for a in "${aa[@]}"; do a="${a//[[:space:]]/}"; [[ "$a" == *:* ]] && continue; if [[ "$a" == "0.0.0.0/0" ]]; then for r in 0.0.0.0/1 128.0.0.0/1; do /sbin/route -q -n add -inet "$r" -interface "$iface" >/dev/null; routes+="${routes:+,}$r"; done; else /sbin/route -q -n add -inet "$a" -interface "$iface" >/dev/null; routes+="${routes:+,}$a"; fi; done
+ if [[ -n "$dns" && -n "$svc" ]]; then local -a dd; dd=( ${(s:,:)dns} ); /usr/sbin/networksetup -setdnsservers "$svc" "${dd[@]}" >/dev/null; /usr/bin/killall -HUP mDNSResponder >/dev/null 2>&1 || true; fi
+ { print "SERVER=$server"; print "IFACE=$iface"; print "PID=$pid"; print "ENDPOINT=$ip"; print "SERVICE=$svc"; print "OLDDNS=$olddns"; print "ROUTES=$routes"; } > "$STATE"; /bin/chmod 600 "$STATE"
+ print "connected $server $iface"
+}
+
+status(){ if [[ -f "$STATE" ]]; then local p i s; p="$(state PID)";i="$(state IFACE)";s="$(state SERVER)"; if [[ -n "$p" && -n "$i" ]] && /bin/kill -0 "$p" 2>/dev/null && /sbin/ifconfig "$i" >/dev/null 2>&1; then print "connected $s $i"; return; fi; fi; print "disconnected"; }
+
+case "${1:-}" in up) [[ $# -eq 2 ]]||exit 64; up "$2";; down) down;; status) status;; *) print -u2 "usage: $0 up SERVER|down|status"; exit 64;; esac
