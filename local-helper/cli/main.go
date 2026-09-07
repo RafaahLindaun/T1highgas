@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,11 +19,12 @@ import (
 )
 
 const (
-	version  = "0.4.0"
+	version  = "0.5.0"
 	addr     = "127.0.0.1:37654"
 	base     = "/Library/Application Support/HighGAS"
 	profiles = base + "/profiles"
 	tunnel   = base + "/highgas-tunnel"
+	siteURL  = "https://lowgas.vercel.app"
 )
 
 var codeRE = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{1,39}$`)
@@ -84,6 +87,32 @@ func main() {
 		panic("HighGAS TLS private key is missing")
 	}
 
+	target, err := url.Parse(siteURL)
+	if err != nil {
+		panic(err)
+	}
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	originalDirector := proxy.Director
+	proxy.Director = func(r *http.Request) {
+		originalDirector(r)
+		r.Host = target.Host
+		r.Header.Del("Origin")
+		r.Header.Set("X-HighGAS-Local-Proxy", version)
+	}
+	proxy.ModifyResponse = func(r *http.Response) error {
+		if r.Request != nil {
+			p := r.Request.URL.Path
+			if p == "/" || p == "/index.html" || p == "/highgas-local-controller.js" {
+				r.Header.Set("Cache-Control", "no-store")
+				r.Header.Set("Pragma", "no-cache")
+			}
+		}
+		return nil
+	}
+	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, e error) {
+		http.Error(w, "HighGAS online interface temporarily unavailable", http.StatusBadGateway)
+	}
+
 	_ = os.MkdirAll(profiles, 0700)
 	a := &app{token: tok}
 	m := http.NewServeMux()
@@ -92,14 +121,15 @@ func main() {
 	m.HandleFunc("/v1/install-profile", a.auth(a.install))
 	m.HandleFunc("/v1/connect", a.auth(a.connect))
 	m.HandleFunc("/v1/disconnect", a.auth(a.disconnect))
+	m.Handle("/", proxy)
 
 	s := &http.Server{
 		Addr:              addr,
 		Handler:           a.cors(m),
 		ReadHeaderTimeout: 3 * time.Second,
-		ReadTimeout:       10 * time.Second,
-		WriteTimeout:      15 * time.Second,
-		IdleTimeout:       30 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       45 * time.Second,
 	}
 
 	if err := s.ListenAndServeTLS(certFile, keyFile); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -164,7 +194,7 @@ func (a *app) health(w http.ResponseWriter, r *http.Request) {
 		"ok":          true,
 		"helper":      true,
 		"version":     version,
-		"transport":   "https",
+		"transport":   "https-local-ui",
 		"engine":      "wireguard-go",
 		"engineReady": te == nil && we == nil,
 	})
@@ -184,7 +214,7 @@ func (a *app) status(w http.ResponseWriter, r *http.Request) {
 	resp := map[string]any{
 		"helper":    true,
 		"version":   version,
-		"transport": "https",
+		"transport": "https-local-ui",
 		"connected": connected,
 		"profiles":  ps,
 		"checkedAt": time.Now().UTC().Format(time.RFC3339),
