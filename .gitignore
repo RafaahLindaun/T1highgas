@@ -12,6 +12,11 @@ dist
 dist-ssr
 *.local
 
+# HighGAS native macOS generated files
+native/macos/.build/
+native/macos/HighGAS.xcodeproj/
+native/macos/*.xcresult
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
