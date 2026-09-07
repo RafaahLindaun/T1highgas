@@ -93,8 +93,6 @@ sudo /bin/chmod 644 "$CACERT" "$SERVERCERT"
 if ! sudo /bin/test -s "$TOKEN"; then
   T="$(/usr/bin/openssl rand -hex 32)"
   printf '%s\n' "$T" | sudo /usr/bin/tee "$TOKEN" >/dev/null
-else
-  T="$(sudo /bin/cat "$TOKEN" | /usr/bin/tr -d '\r\n ')"
 fi
 sudo /usr/sbin/chown root:wheel "$TOKEN"
 sudo /bin/chmod 600 "$TOKEN"
@@ -132,14 +130,21 @@ sleep 1
 
 HEALTH="$(sudo /usr/bin/curl -fsS --max-time 5 --cacert "$CACERT" https://127.0.0.1:37654/v1/health 2>/dev/null || true)"
 if [[ "$HEALTH" == *'"torReady":true'* && "$HEALTH" == *'"controllerReady":true'* ]]; then
-  echo "HighGAS Local seguro: WireGuard + Tor + controlador local instalados."
-  PAIR_NONCE="$(/bin/date +%s)-$RANDOM"
-  /usr/bin/open "$SITE/?highgas-local=1&pair=$PAIR_NONCE#highgas-helper=$T"
+  echo "HighGAS Local direto: Tor + controlador instalados."
+  WEBLOC="$HOME/Desktop/HighGAS.webloc"
+  cat > "$WEBLOC" <<EOF_WEBLOC
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>URL</key><string>$SITE/</string></dict></plist>
+EOF_WEBLOC
+  echo "Atalho HighGAS criado na Mesa."
+  echo "Link fixo: $SITE/"
+  /usr/bin/open "$SITE/"
 else
   echo "O serviço não passou na verificação final. Log: $SYSTEM/helper-error.log"
   echo "Não vou abrir o HighGAS até Tor e controlador local estarem saudáveis."
 fi
 
-echo "Pronto: sem Xcode e sem assinatura. Alemanha/EUA usam o modo Tor gratuito."
+echo "Pronto. Depois desta instalação você abre o HighGAS pelo atalho da Mesa ou por $SITE/."
 read -k 1 '?Pressione qualquer tecla para fechar.'
 echo
