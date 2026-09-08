@@ -11,13 +11,14 @@ CACERT="$CERTDIR/highgas-local-ca.crt"
 CAKEY="$CERTDIR/highgas-local-ca.key"
 SERVERCERT="$CERTDIR/server.crt"
 SERVERKEY="$CERTDIR/server.key"
+CI_MODE="${HIGHGAS_CI:-0}"
 
 for f in highgas-helper highgas-tunnel highgas-tor wireguard-go tun2socks; do
-  [[ -f "$ROOT/$f" ]] || { echo "Pacote incompleto: $f"; read -k 1 '?Fechar'; exit 1; }
+  [[ -f "$ROOT/$f" ]] || { echo "Pacote incompleto: $f"; [[ "$CI_MODE" == "1" ]] || read -k 1 '?Fechar'; exit 1; }
 done
-[[ -f "$ROOT/highgas-local-controller.js" ]] || { echo "Pacote incompleto: controlador local"; read -k 1 '?Fechar'; exit 1; }
-[[ -x "$ROOT/tor-expert/tor/tor" ]] || { echo "Pacote incompleto: motor Tor"; read -k 1 '?Fechar'; exit 1; }
-[[ -f "$ROOT/tor-expert/data/geoip" && -f "$ROOT/tor-expert/data/geoip6" ]] || { echo "Pacote incompleto: dados GeoIP do Tor"; read -k 1 '?Fechar'; exit 1; }
+[[ -f "$ROOT/highgas-local-controller.js" ]] || { echo "Pacote incompleto: controlador local"; [[ "$CI_MODE" == "1" ]] || read -k 1 '?Fechar'; exit 1; }
+[[ -x "$ROOT/tor-expert/tor/tor" ]] || { echo "Pacote incompleto: motor Tor"; [[ "$CI_MODE" == "1" ]] || read -k 1 '?Fechar'; exit 1; }
+[[ -f "$ROOT/tor-expert/data/geoip" && -f "$ROOT/tor-expert/data/geoip6" ]] || { echo "Pacote incompleto: dados GeoIP do Tor"; [[ "$CI_MODE" == "1" ]] || read -k 1 '?Fechar'; exit 1; }
 
 /usr/bin/xattr -dr com.apple.quarantine "$ROOT" >/dev/null 2>&1 || true
 
@@ -154,12 +155,17 @@ EOF_WEBLOC
   /usr/bin/plutil -lint "$WEBLOC" >/dev/null
   echo "Atalho HighGAS criado/atualizado na Mesa."
   echo "Link fixo: $SITE/"
-  /usr/bin/open "$SITE/"
+  if [[ "$CI_MODE" != "1" ]]; then
+    /usr/bin/open "$SITE/"
+  fi
 else
   echo "O serviço não passou na verificação final. Log: $SYSTEM/helper-error.log"
   echo "Não vou abrir o HighGAS até todos os motores estarem saudáveis."
+  exit 20
 fi
 
 echo "Pronto. Ao conectar, o HighGAS só mostra CONECTADO após IP, país, DNS, IPv6 e Kill Switch passarem."
-read -k 1 '?Pressione qualquer tecla para fechar.'
-echo
+if [[ "$CI_MODE" != "1" ]]; then
+  read -k 1 '?Pressione qualquer tecla para fechar.'
+  echo
+fi
