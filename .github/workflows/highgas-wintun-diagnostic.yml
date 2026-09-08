@@ -1,0 +1,71 @@
+name: HighGAS Wintun Diagnostic
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [highgas-windows11-universal-v2]
+    paths:
+      - '.github/workflows/highgas-wintun-diagnostic.yml'
+
+env:
+  TUN2SOCKS_VERSION: '2.7.0'
+  TUN2SOCKS_WIN_SHA256: 'c5d46e9452f6c9cc7c15ab9158d6d6a0169ceecd6bca019ce476b49337d2be43'
+  WINTUN_VERSION: '0.14.1'
+
+jobs:
+  diagnose:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Diagnose Wintun creation forms
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          $ProgressPreference='SilentlyContinue'
+          $base="$env:RUNNER_TEMP\highgas-wintun-diag"
+          New-Item -ItemType Directory -Force $base | Out-Null
+          Invoke-WebRequest -UseBasicParsing "https://github.com/xjasonlyu/tun2socks/releases/download/v$env:TUN2SOCKS_VERSION/tun2socks-windows-amd64.zip" -OutFile "$base\t2s.zip"
+          $sha=(Get-FileHash "$base\t2s.zip" -Algorithm SHA256).Hash.ToLowerInvariant()
+          if($sha -ne $env:TUN2SOCKS_WIN_SHA256){throw "tun2socks hash $sha"}
+          Expand-Archive "$base\t2s.zip" "$base\t2s" -Force
+          $tun=(Get-ChildItem "$base\t2s" -Recurse -File | Where-Object Name -like 'tun2socks*.exe' | Select-Object -First 1).FullName
+          Invoke-WebRequest -UseBasicParsing "https://www.wintun.net/builds/wintun-$env:WINTUN_VERSION.zip" -OutFile "$base\wintun.zip"
+          Expand-Archive "$base\wintun.zip" "$base\wintun" -Force
+          $dll=(Get-ChildItem "$base\wintun" -Recurse -File -Filter wintun.dll | Where-Object FullName -match 'amd64' | Select-Object -First 1).FullName
+          Copy-Item $dll (Split-Path $tun) -Force
+          $route=Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' | Where-Object NextHop -ne '0.0.0.0' | Sort-Object RouteMetric | Select-Object -First 1
+          if(!$route){throw 'default route absent'}
+          $alias=$route.InterfaceAlias
+          Write-Host "PRIMARY=$alias"
+          & $tun --version
+
+          function Try-Form([string]$name,[string[]]$arguments,[string]$adapterRegex) {
+            Write-Host "===== FORM $name ====="
+            $out=Join-Path $base "$name.out.log"
+            $err=Join-Path $base "$name.err.log"
+            Remove-Item $out,$err -Force -ErrorAction SilentlyContinue
+            $p=Start-Process -FilePath $tun -ArgumentList $arguments -WorkingDirectory (Split-Path $tun) -PassThru -WindowStyle Hidden -RedirectStandardOutput $out -RedirectStandardError $err
+            $adapter=$null
+            for($i=0;$i -lt 75;$i++) {
+              if($p.HasExited){break}
+              $adapter=Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.Name -match $adapterRegex -or $_.InterfaceDescription -match 'Wintun' } | Sort-Object ifIndex -Descending | Select-Object -First 1
+              if($adapter){break}
+              Start-Sleep -Milliseconds 200
+            }
+            Write-Host "EXITED=$($p.HasExited) EXITCODE=$(if($p.HasExited){$p.ExitCode}else{'running'})"
+            if(Test-Path $out){Write-Host '--- STDOUT ---'; Get-Content $out -ErrorAction SilentlyContinue}
+            if(Test-Path $err){Write-Host '--- STDERR ---'; Get-Content $err -ErrorAction SilentlyContinue}
+            Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.InterfaceDescription -match 'Wintun' -or $_.Name -match 'wintun|HighGASDiag' } | Format-Table Name,InterfaceDescription,Status,ifIndex -AutoSize | Out-String | Write-Host
+            $ok=[bool]$adapter
+            if(!$p.HasExited){Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue}
+            Start-Sleep -Seconds 1
+            if($ok){Write-Host "FORM_OK=$name"}else{Write-Host "FORM_FAIL=$name"}
+            return $ok
+          }
+
+          $r1=Try-Form 'legacy-interface' @('--device','wintun','--proxy','socks5://127.0.0.1:9','--interface',$alias,'--loglevel','debug') 'wintun'
+          $r2=Try-Form 'legacy-no-interface' @('--device','wintun','--proxy','socks5://127.0.0.1:9','--loglevel','debug') 'wintun'
+          $r3=Try-Form 'tun-scheme-no-interface' @('--device','tun://HighGASDiagA','--proxy','socks5://127.0.0.1:9','--loglevel','debug') 'HighGASDiagA'
+          $r4=Try-Form 'tun-scheme-interface' @('--device','tun://HighGASDiagB','--proxy','socks5://127.0.0.1:9','--interface',$alias,'--loglevel','debug') 'HighGASDiagB'
+          if(!($r1 -or $r2 -or $r3 -or $r4)){throw 'No Wintun invocation form created an adapter'}
+          Write-Host "DIAGNOSTIC_PASS r1=$r1 r2=$r2 r3=$r3 r4=$r4"
