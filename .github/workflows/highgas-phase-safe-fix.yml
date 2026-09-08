@@ -1,0 +1,223 @@
+name: HighGAS Phase Safe PF Fix
+
+on:
+  push:
+    branches: [highgas-full-tunnel-v1]
+    paths:
+      - '.github/workflows/highgas-phase-safe-fix.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch-engine:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: highgas-full-tunnel-v1
+      - name: Activate kill switch before Tor and preserve only new Tor states
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          p = Path('local-helper/highgas-tor')
+          s = p.read_text()
+
+          new_pf = r'''pf_enable_and_load() {
+            local dev="$1" gw="$2" iface="${3:-}" flush_states="${4:-no}" pfstate rules token=""
+            rules="$(/usr/bin/mktemp -t highgas-pf).conf"
+            {
+              print -r -- "pass out quick on lo0 all"
+              print -r -- "pass out quick on $dev inet proto tcp user $PFUSER keep state"
+              if [[ -n "$iface" ]]; then
+                print -r -- "pass out quick on $iface route-to ($dev $gw) inet proto tcp user $PFUSER keep state"
+              fi
+              print -r -- "block drop out quick on $dev inet all"
+              print -r -- "block drop out quick inet6 all"
+            } > "$rules"
+
+            /sbin/pfctl -nf "$rules" >/dev/null 2>&1 || { /bin/rm -f "$rules"; print -u2 "o kill switch do macOS rejeitou as regras de segurança"; return 1; }
+
+            pfstate="$(/sbin/pfctl -s info 2>/dev/null | /usr/bin/awk '/Status:/{print $2;exit}')"
+            if [[ "$pfstate" != "Enabled" ]]; then
+              token="$(/sbin/pfctl -E 2>&1 | /usr/bin/sed -n 's/.*Token[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p' | /usr/bin/tail -1)"
+              [[ -n "$token" ]] && print -r -- "$token" > "$PFTOKEN"
+            fi
+
+            /sbin/pfctl -a "$PFANCHOR" -f "$rules" >/dev/null 2>&1 || {
+              /bin/rm -f "$rules"
+              remove_pf
+              print -u2 "não consegui ativar o kill switch do HighGAS"
+              return 1
+            }
+            /bin/rm -f "$rules"
+
+            # O primeiro carregamento acontece ANTES do Tor existir. Assim podemos
+            # eliminar todos os states diretos antigos sem matar o circuito Tor.
+            if [[ "$flush_states" == "yes" ]]; then
+              /sbin/pfctl -F states >/dev/null 2>&1 || true
+            fi
+            return 0
+          }'''
+
+          s, n = re.subn(r'pf_enable_and_load\(\) \{.*?\n\}\n\ndns_probe\(\)', new_pf + '\n\ndns_probe()', s, count=1, flags=re.S)
+          if n != 1:
+            raise SystemExit('pf_enable_and_load block not found exactly once')
+
+          new_up = r'''up() {
+            local server="$1" country expected routeinfo gw dev svc dnsstate dnsmode dnslist baseline iface torpid tunpid booted=0 torprobe="" verify=""
+            country="$(country_for_server "$server")" || { print -u2 "Tor gratuito disponível apenas para Alemanha e Estados Unidos"; return 64; }
+            expected="${(U)country}"
+
+            [[ -x "$TOR" ]] || { print -u2 "motor Tor não está instalado"; return 2; }
+            [[ -x "$TUN2SOCKS" ]] || { print -u2 "motor Full Tunnel não está instalado"; return 2; }
+            [[ -r "$GEOIP" && -r "$GEOIP6" ]] || { print -u2 "dados GeoIP do Tor não estão instalados"; return 2; }
+            [[ -x /usr/bin/dig ]] || { print -u2 "verificador DNS do macOS não foi encontrado"; return 2; }
+            /usr/bin/id "$PFUSER" >/dev/null 2>&1 || { print -u2 "usuário seguro do sistema não encontrado"; return 2; }
+
+            down >/dev/null 2>&1 || true
+
+            routeinfo="$(default_route)"
+            gw="$(print -r -- "$routeinfo" | /usr/bin/awk '/gateway:/{print $2;exit}')"
+            dev="$(print -r -- "$routeinfo" | /usr/bin/awk '/interface:/{print $2;exit}')"
+            [[ -n "$gw" && -n "$dev" ]] || { print -u2 "não consegui identificar a rota física de internet"; return 3; }
+            svc="$(service_for_device "$dev")"
+            [[ -n "$svc" ]] || { print -u2 "não consegui identificar o serviço de internet ativo"; return 3; }
+
+            dnsstate="$(save_dns_state "$svc")"
+            dnsmode="${dnsstate%%|*}"
+            dnslist="${dnsstate#*|}"
+            baseline="$(baseline_ip "$dev")"
+            [[ -n "$baseline" ]] || { print -u2 "não consegui registrar o IP anterior antes de ligar"; return 3; }
+
+            /bin/rm -rf "$DATADIR"
+            /bin/mkdir -p "$DATADIR"
+            /usr/sbin/chown -R "$PFUSER" "$RUNTIME"
+            /bin/chmod 700 "$RUNTIME" "$DATADIR" >/dev/null 2>&1 || true
+            : > "$LOG"
+            : > "$TUNLOG"
+            /usr/sbin/chown "$PFUSER" "$LOG" "$TUNLOG"
+            /bin/rm -f "$PIDFILE" "$TUNPID" "$PFTOKEN" "$TUNNAME"
+
+            # Grave o estado ANTES de ativar o PF para que qualquer falha possa
+            # sempre restaurar DNS/rede de forma determinística.
+            {
+              print -r -- "SERVICE=$svc"
+              print -r -- "DEVICE=$dev"
+              print -r -- "GATEWAY=$gw"
+              print -r -- "DNSMODE=$dnsmode"
+              print -r -- "DNSLIST=$dnslist"
+              print -r -- "COUNTRY=$country"
+              print -r -- "EXPECTED=$expected"
+              print -r -- "SERVER=$server"
+              print -r -- "BASELINE_IP=$baseline"
+              print -r -- "STARTED_AT=$(/bin/date +%s)"
+            } > "$STATE"
+            /bin/chmod 600 "$STATE"
+
+            # Fase 1 fail-closed: bloqueia tráfego direto e elimina states antigos
+            # ANTES do Tor existir. Somente o usuário isolado _www poderá sair.
+            pf_enable_and_load "$dev" "$gw" "" yes || { down >/dev/null 2>&1 || true; return 9; }
+
+            "$TOR" \
+              --User "$PFUSER" \
+              --ClientOnly 1 \
+              --RunAsDaemon 1 \
+              --AvoidDiskWrites 1 \
+              --ClientUseIPv6 0 \
+              --SocksPort "127.0.0.1:$SOCKS_PORT" \
+              --DNSPort "127.0.0.1:$DNS_PORT" \
+              --DataDirectory "$DATADIR" \
+              --GeoIPFile "$GEOIP" \
+              --GeoIPv6File "$GEOIP6" \
+              --ExitNodes "{$country}" \
+              --StrictNodes 1 \
+              --PidFile "$PIDFILE" \
+              --Log "notice file $LOG" >/dev/null 2>&1 || { print -u2 "o Tor não conseguiu iniciar sob o kill switch"; down >/dev/null 2>&1 || true; return 5; }
+
+            for _ in {1..100}; do
+              [[ -s "$PIDFILE" ]] && break
+              /bin/sleep 0.1
+            done
+            torpid="$(/bin/cat "$PIDFILE" 2>/dev/null || true)"
+            [[ -n "$torpid" ]] || { print -u2 "Tor iniciou sem registrar PID"; down >/dev/null 2>&1 || true; return 5; }
+
+            for _ in {1..150}; do
+              if /usr/bin/grep -q "Bootstrapped 100%" "$LOG" 2>/dev/null; then booted=1; break; fi
+              /bin/kill -0 "$torpid" >/dev/null 2>&1 || { print -u2 "Tor encerrou antes de conectar"; down >/dev/null 2>&1 || true; return 6; }
+              /bin/sleep 1
+            done
+            [[ "$booted" -eq 1 ]] || { print -u2 "Tor demorou demais para conectar"; down >/dev/null 2>&1 || true; return 7; }
+
+            torprobe="$(tor_probe "$expected" 2>/dev/null || true)"
+            [[ -n "$torprobe" ]] || { print -u2 "o Tor conectou, mas não confirmou a saída $expected"; down >/dev/null 2>&1 || true; return 7; }
+            print -r -- "TOR_PROBE_IP=${torprobe%%|*}" >> "$STATE"
+
+            /usr/sbin/lsof -nP -a -p "$torpid" -iUDP:"$DNS_PORT" >/dev/null 2>&1 || { print -u2 "o DNS protegido do Tor não iniciou"; down >/dev/null 2>&1 || true; return 7; }
+            dns_probe || { print -u2 "o DNS protegido não respondeu"; down >/dev/null 2>&1 || true; return 7; }
+
+            # Fase 2: cria o utun só depois de o Tor já estar comprovadamente vivo.
+            /usr/bin/env WG_TUN_NAME_FILE="$TUNNAME" "$TUN2SOCKS" --device utun --proxy "socks5://127.0.0.1:$SOCKS_PORT" >"$TUNLOG" 2>&1 &
+            tunpid=$!
+            print -r -- "$tunpid" > "$TUNPID"
+            for _ in {1..100}; do
+              [[ -s "$TUNNAME" ]] && break
+              /bin/kill -0 "$tunpid" >/dev/null 2>&1 || { print -u2 "o motor Full Tunnel encerrou ao iniciar"; [[ -s "$TUNLOG" ]] && /bin/cat "$TUNLOG" >&2; down >/dev/null 2>&1 || true; return 10; }
+              /bin/sleep 0.1
+            done
+            [[ -s "$TUNNAME" ]] || { print -u2 "o macOS não informou a interface Full Tunnel"; down >/dev/null 2>&1 || true; return 10; }
+            iface="$(/bin/cat "$TUNNAME" 2>/dev/null | /usr/bin/tr -d '\r\n')"
+            [[ "$iface" =~ ^utun[0-9]+$ ]] || { print -u2 "nome de interface Full Tunnel inválido: $iface"; down >/dev/null 2>&1 || true; return 10; }
+            /sbin/ifconfig "$iface" >/dev/null 2>&1 || { print -u2 "a interface Full Tunnel não foi criada"; down >/dev/null 2>&1 || true; return 10; }
+            print -r -- "IFACE=$iface" >> "$STATE"
+            /sbin/ifconfig "$iface" inet "$TUN_ADDR" "$TUN_ADDR" up >/dev/null
+
+            # Recarrega o anchor SEM limpar states. Os únicos states diretos que
+            # nasceram após a limpeza inicial são do Tor isolado (_www).
+            pf_enable_and_load "$dev" "$gw" "$iface" no || { down >/dev/null 2>&1 || true; return 9; }
+
+            local r
+            for r in "${ROUTES[@]}"; do
+              /sbin/route -q -n add -inet "$r" -interface "$iface" >/dev/null 2>&1 || { print -u2 "não consegui proteger a rota $r"; down >/dev/null 2>&1 || true; return 11; }
+            done
+            /usr/sbin/networksetup -setdnsservers "$svc" 127.0.0.1 >/dev/null || { print -u2 "não consegui proteger o DNS"; down >/dev/null 2>&1 || true; return 12; }
+            /usr/bin/killall -HUP mDNSResponder >/dev/null 2>&1 || true
+
+            # Aguarda o stack do macOS convergir e exige todas as provas antes de
+            # declarar conectado: IP mudou, país, DNS, IPv6 e rotas/kill switch.
+            for _ in {1..30}; do
+              verify="$(verification_lines 2>/dev/null || true)"
+              print -r -- "$verify" | /usr/bin/grep -q '^VERIFIED=1$' && break
+              /bin/sleep 1
+            done
+            if ! print -r -- "$verify" | /usr/bin/grep -q '^VERIFIED=1$'; then
+              print -u2 "a verificação completa não passou; o HighGAS desligou para evitar vazamento"
+              print -u2 -- "$verify"
+              down >/dev/null 2>&1 || true
+              return 13
+            fi
+
+            print -r -- "connected tor $country $server $(state STARTED_AT)"
+          }'''
+
+          s, n = re.subn(r'up\(\) \{.*?\n\}\n\nstatus\(\)', new_up + '\n\nstatus()', s, count=1, flags=re.S)
+          if n != 1:
+            raise SystemExit('up block not found exactly once')
+
+          p.write_text(s)
+          PY
+
+          zsh -n local-helper/highgas-tor
+          grep -Fq 'pf_enable_and_load "$dev" "$gw" "" yes' local-helper/highgas-tor
+          grep -Fq 'pf_enable_and_load "$dev" "$gw" "$iface" no' local-helper/highgas-tor
+          grep -Fq 'Os únicos states diretos' local-helper/highgas-tor
+          git diff --check
+          git config user.name 'HighGAS CI'
+          git config user.email '89591381+RafaahLindaun@users.noreply.github.com'
+          git add local-helper/highgas-tor
+          git commit -m 'HighGAS: ativar kill switch antes do Tor sem destruir circuito'
+          git push origin HEAD:highgas-full-tunnel-v1
