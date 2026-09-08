@@ -19,11 +19,10 @@ jobs:
           Invoke-WebRequest -UseBasicParsing "https://archive.torproject.org/tor-package-archive/torbrowser/$env:TOR_VERSION/tor-expert-bundle-windows-x86_64-$env:TOR_VERSION.tar.gz" -OutFile "$b\tor.tgz"
           tar -xzf "$b\tor.tgz" -C $b
           $tor="$b\tor\tor.exe";$geo="$b\data\geoip";$geo6="$b\data\geoip6"
-          function RunForm([string]$name,[string[]]$args){
-            $data="$b\data-$name";New-Item -ItemType Directory -Force $data|Out-Null
+          function RunForm([string]$name,[string[]]$argv){
             $out="$b\$name.out";$err="$b\$name.err"
-            Write-Host "===== $name =====";Write-Host ($args -join ' | ')
-            $p=Start-Process $tor -ArgumentList $args -PassThru -WindowStyle Hidden -RedirectStandardOutput $out -RedirectStandardError $err
+            Write-Host "===== $name =====";Write-Host ($argv -join ' | ')
+            $p=Start-Process $tor -ArgumentList $argv -PassThru -WindowStyle Hidden -RedirectStandardOutput $out -RedirectStandardError $err
             Start-Sleep -Seconds 5
             Write-Host "EXITED=$($p.HasExited)"
             if(Test-Path $out){Write-Host 'STDOUT';Get-Content $out -ErrorAction SilentlyContinue}
@@ -32,6 +31,7 @@ jobs:
             if($ok){Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue}
             return $ok
           }
+          New-Item -ItemType Directory -Force "$b\data-array","$b\data-quoted","$b\data-nolog"|Out-Null
           $a1=@('--SocksPort','127.0.0.1:39500','--DataDirectory',"$b\data-array",'--GeoIPFile',$geo,'--GeoIPv6File',$geo6,'--ExitNodes','{de}','--StrictNodes','1','--ClientUseIPv6','0','--Log','notice stdout')
           $r1=RunForm 'array-log-space' $a1
           $a2=@('--SocksPort','127.0.0.1:39501','--DataDirectory',"$b\data-quoted",'--GeoIPFile',$geo,'--GeoIPv6File',$geo6,'--ExitNodes','{de}','--StrictNodes','1','--ClientUseIPv6','0','--Log','"notice stdout"')
