@@ -150,49 +150,77 @@ jobs:
 
           for cycle in $(seq 1 20); do
             if [ $((cycle % 2)) -eq 1 ]; then SERVER='de-fra-01'; EXPECTED='DE'; else SERVER='us-mia-01'; EXPECTED='US'; fi
-            echo "CYCLE=$cycle SERVER=$SERVER EXPECTED=$EXPECTED"
+            echo "CYCLE=$cycle SERVER=$SERVER EXPECTED=$EXPECTED" | tee -a "$REPORT"
             success=0
-            for attempt in 1 2 3; do
+
+            for attempt in 1 2 3 4 5; do
               api POST /v1/disconnect '{}' >/dev/null 2>&1 || true
               sleep 1
               echo "CYCLE=$cycle ATTEMPT=$attempt" | tee -a "$REPORT"
-              if CONNECT="$(api POST /v1/connect "{\"server\":\"$SERVER\"}" 2>&1)"; then
-                if printf '%s' "$CONNECT" | grep -q '"ok":true' && \
-                   printf '%s' "$CONNECT" | grep -q '"mode":"tor"'; then
-                  STATUS="$(api GET /v1/status)"
-                  NET="$(api GET /api/network-info)"
-                  VERIFY="$(sudo "$SYSTEM/highgas-tor" verify)"
-                  if printf '%s' "$STATUS" | grep -q '"connected":true' && \
-                     printf '%s' "$STATUS" | grep -q "\"activeServer\":\"$SERVER\"" && \
-                     printf '%s' "$STATUS" | grep -q "\"country\":\"$EXPECTED\"" && \
-                     printf '%s' "$NET" | grep -q "\"country\":\"$EXPECTED\"" && \
-                     printf '%s\n' "$VERIFY" | grep -q '^VERIFIED=1$' && \
-                     printf '%s\n' "$VERIFY" | grep -q '^DNS_OK=1$' && \
-                     printf '%s\n' "$VERIFY" | grep -q '^IPV6_OK=1$' && \
-                     printf '%s\n' "$VERIFY" | grep -q '^ROUTE_OK=1$'; then
-                    success=1
-                    printf 'PASS cycle=%02d server=%s country=%s attempt=%d\n' "$cycle" "$SERVER" "$EXPECTED" "$attempt" | tee -a "$REPORT"
-                    break
-                  fi
-                fi
+
+              set +e
+              CONNECT="$(api POST /v1/connect "{\"server\":\"$SERVER\"}" 2>&1)"
+              RC_CONNECT=$?
+              STATUS=''
+              NET=''
+              VERIFY=''
+              RC_STATUS=1
+              RC_NET=1
+              RC_VERIFY=1
+
+              if [ "$RC_CONNECT" -eq 0 ]; then
+                STATUS="$(api GET /v1/status 2>&1)"
+                RC_STATUS=$?
+                NET="$(api GET /api/network-info 2>&1)"
+                RC_NET=$?
+                VERIFY="$(sudo "$SYSTEM/highgas-tor" verify 2>&1)"
+                RC_VERIFY=$?
               fi
-              printf 'RETRY cycle=%02d attempt=%d\n' "$cycle" "$attempt" | tee -a "$REPORT"
+              set -e
+
+              if [ "$RC_CONNECT" -eq 0 ] && [ "$RC_STATUS" -eq 0 ] && [ "$RC_NET" -eq 0 ] && [ "$RC_VERIFY" -eq 0 ] && \
+                 printf '%s' "$CONNECT" | grep -q '"ok":true' && \
+                 printf '%s' "$CONNECT" | grep -q '"mode":"tor"' && \
+                 printf '%s' "$STATUS" | grep -q '"connected":true' && \
+                 printf '%s' "$STATUS" | grep -q "\"activeServer\":\"$SERVER\"" && \
+                 printf '%s' "$STATUS" | grep -q "\"country\":\"$EXPECTED\"" && \
+                 printf '%s' "$NET" | grep -q "\"country\":\"$EXPECTED\"" && \
+                 printf '%s\n' "$VERIFY" | grep -q '^VERIFIED=1$' && \
+                 printf '%s\n' "$VERIFY" | grep -q '^DNS_OK=1$' && \
+                 printf '%s\n' "$VERIFY" | grep -q '^IPV6_OK=1$' && \
+                 printf '%s\n' "$VERIFY" | grep -q '^ROUTE_OK=1$'; then
+                success=1
+                printf 'PASS cycle=%02d server=%s country=%s attempt=%d\n' "$cycle" "$SERVER" "$EXPECTED" "$attempt" | tee -a "$REPORT"
+                break
+              fi
+
+              printf 'RETRY cycle=%02d attempt=%d rc_connect=%d rc_status=%d rc_net=%d rc_verify=%d\n' \
+                "$cycle" "$attempt" "$RC_CONNECT" "$RC_STATUS" "$RC_NET" "$RC_VERIFY" | tee -a "$REPORT"
+              if [ "$RC_CONNECT" -ne 0 ]; then printf 'CONNECT_DETAIL=%s\n' "$(printf '%s' "$CONNECT" | tail -c 800)" | tee -a "$REPORT"; fi
               sleep 2
             done
-            test "$success" = 1
+
+            if [ "$success" -ne 1 ]; then
+              echo "FAIL cycle=$cycle server=$SERVER after=5-attempts" | tee -a "$REPORT"
+              sudo "$SYSTEM/highgas-tor" status 2>&1 | tail -n 30 | tee -a "$REPORT" || true
+              exit 1
+            fi
+
             api POST /v1/disconnect '{}' | grep -q '"ok":true'
             api GET /v1/status | grep -q '"connected":false'
-            curl -4 -fsS --max-time 20 https://lowgas.vercel.app/api/network-info | grep -q '"ip"'
+            curl -4 -fsS --retry 2 --retry-delay 1 --max-time 20 https://lowgas.vercel.app/api/network-info | grep -q '"ip"'
           done
 
           test "$(grep -c '^PASS cycle=' "$REPORT")" = 20
+          test "$(grep -c 'server=de-fra-01' "$REPORT")" -ge 10
+          test "$(grep -c 'server=us-mia-01' "$REPORT")" -ge 10
           echo 'MACOS_20X_FULL_TUNNEL=PASS' | tee -a "$REPORT"
 
           HIGHGAS_CI=1 "$OUT/uninstall.command"
           trap - EXIT
           ! sudo test -e "$SYSTEM"
           ! sudo test -e /Library/LaunchDaemons/app.highgas.helper.plist
-          curl -4 -fsS --max-time 20 https://lowgas.vercel.app/api/network-info | grep -q '"ip"'
+          curl -4 -fsS --retry 2 --retry-delay 1 --max-time 20 https://lowgas.vercel.app/api/network-info | grep -q '"ip"'
 
       - name: Final integrity
         shell: bash
