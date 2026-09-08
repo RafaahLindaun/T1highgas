@@ -1,0 +1,182 @@
+name: HighGAS Windows Final
+
+on:
+  push:
+    branches: [highgas-full-tunnel-v1]
+    paths:
+      - '.github/workflows/highgas-windows-final.yml'
+      - 'windows/**'
+      - 'public/highgas-local-controller.js'
+
+permissions:
+  contents: read
+
+env:
+  TOR_EXPERT_VERSION: '15.0.21'
+  TOR_WINDOWS_SHA256: 'f22b8b17cb18c9fa775dfcf68acf6a2fe788336535fe94645204ca85158aa490'
+  SINGBOX_VERSION: '1.14.0'
+  SINGBOX_WINDOWS_SHA256: '3ffb56267da14e287be48bd10cf7e6505260125bad940b75101fbb4d5d58e5d6'
+
+jobs:
+  windows-final:
+    runs-on: windows-2025
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23.x'
+          cache-dependency-path: windows/go.mod
+
+      - name: Build and static checks
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Push-Location windows
+          gofmt -w main.go
+          if (git diff --exit-code -- main.go) { } else { throw 'windows/main.go is not gofmt-clean' }
+          go vet ./...
+          go test ./...
+          go build -trimpath -ldflags='-s -w' -o "$env:RUNNER_TEMP\highgas-helper.exe" .
+          Pop-Location
+          if (-not (Test-Path "$env:RUNNER_TEMP\highgas-helper.exe")) { throw 'helper build missing' }
+          $bytes = [IO.File]::ReadAllBytes("$env:RUNNER_TEMP\highgas-helper.exe")
+          if ($bytes[0] -ne 0x4d -or $bytes[1] -ne 0x5a) { throw 'helper is not a Windows PE executable' }
+          $null = [scriptblock]::Create((Get-Content -Raw windows/highgas-tor.ps1))
+          $null = [scriptblock]::Create((Get-Content -Raw windows/install.ps1))
+          $null = [scriptblock]::Create((Get-Content -Raw windows/uninstall.ps1))
+          if ((Get-Content -Raw windows/highgas-tor.ps1) -notmatch 'strict_route') { throw 'strict_route missing' }
+          if ((Get-Content -Raw windows/highgas-tor.ps1) -notmatch 'process_name.*tor.exe') { throw 'tor process bypass missing' }
+          if ((Get-Content -Raw windows/highgas-tor.ps1) -notmatch 'ip_version.*6.*reject') { throw 'IPv6 reject missing' }
+          if ((Get-Content -Raw windows/highgas-tor.ps1) -notmatch 'network.*udp.*reject') { throw 'UDP reject missing' }
+
+      - name: Assemble pinned offline payload
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $out = Join-Path $env:RUNNER_TEMP 'HighGAS-Final-Windows-x64'
+          $payload = Join-Path $out 'payload'
+          Remove-Item -Recurse -Force $out -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path $payload | Out-Null
+
+          $torArchive = Join-Path $env:RUNNER_TEMP 'tor-expert-windows.tar.gz'
+          Invoke-WebRequest -UseBasicParsing -Uri "https://dist.torproject.org/torbrowser/$env:TOR_EXPERT_VERSION/tor-expert-bundle-windows-x86_64-$env:TOR_EXPERT_VERSION.tar.gz" -OutFile $torArchive
+          $torHash = (Get-FileHash -Algorithm SHA256 $torArchive).Hash.ToLowerInvariant()
+          if ($torHash -ne $env:TOR_WINDOWS_SHA256) { throw "Tor SHA256 mismatch: $torHash" }
+          $torDest = Join-Path $payload 'tor-expert'
+          New-Item -ItemType Directory -Force -Path $torDest | Out-Null
+          tar.exe -xzf $torArchive -C $torDest
+          if ($LASTEXITCODE -ne 0) { throw 'Tor extraction failed' }
+          if (-not (Test-Path (Join-Path $torDest 'tor\tor.exe'))) { throw 'tor.exe missing' }
+          if (-not (Test-Path (Join-Path $torDest 'data\geoip'))) { throw 'geoip missing' }
+          if (-not (Test-Path (Join-Path $torDest 'data\geoip6'))) { throw 'geoip6 missing' }
+
+          $singArchive = Join-Path $env:RUNNER_TEMP 'sing-box-windows.zip'
+          Invoke-WebRequest -UseBasicParsing -Uri "https://github.com/SagerNet/sing-box/releases/download/v$env:SINGBOX_VERSION/sing-box-$env:SINGBOX_VERSION-windows-amd64.zip" -OutFile $singArchive
+          $singHash = (Get-FileHash -Algorithm SHA256 $singArchive).Hash.ToLowerInvariant()
+          if ($singHash -ne $env:SINGBOX_WINDOWS_SHA256) { throw "sing-box SHA256 mismatch: $singHash" }
+          $singTmp = Join-Path $env:RUNNER_TEMP 'singbox-extract'
+          Remove-Item -Recurse -Force $singTmp -ErrorAction SilentlyContinue
+          Expand-Archive -Path $singArchive -DestinationPath $singTmp -Force
+          $singExe = Get-ChildItem $singTmp -Recurse -Filter sing-box.exe | Select-Object -First 1
+          if (-not $singExe) { throw 'sing-box.exe missing' }
+          $singDest = Join-Path $payload 'sing-box'
+          New-Item -ItemType Directory -Force -Path $singDest | Out-Null
+          Copy-Item $singExe.FullName (Join-Path $singDest 'sing-box.exe') -Force
+
+          Copy-Item "$env:RUNNER_TEMP\highgas-helper.exe" (Join-Path $payload 'highgas-helper.exe')
+          Copy-Item windows/highgas-tor.ps1 (Join-Path $payload 'highgas-tor.ps1')
+          Copy-Item public/highgas-local-controller.js (Join-Path $payload 'highgas-local-controller.js')
+          Copy-Item windows/install.ps1 (Join-Path $out 'install.ps1')
+          Copy-Item windows/uninstall.ps1 (Join-Path $out 'uninstall.ps1')
+          Copy-Item windows/README-WINDOWS.txt (Join-Path $out 'README-WINDOWS.txt')
+
+          $hashFiles = @(
+            (Join-Path $payload 'highgas-helper.exe'),
+            (Join-Path $payload 'highgas-tor.ps1'),
+            (Join-Path $payload 'sing-box\sing-box.exe'),
+            (Join-Path $payload 'tor-expert\tor\tor.exe'),
+            (Join-Path $payload 'tor-expert\data\geoip'),
+            (Join-Path $payload 'tor-expert\data\geoip6')
+          )
+          $lines = foreach ($f in $hashFiles) {
+            $h = (Get-FileHash -Algorithm SHA256 $f).Hash.ToLowerInvariant()
+            "$h  $($f.Substring($out.Length+1).Replace('\','/'))"
+          }
+          [IO.File]::WriteAllLines((Join-Path $out 'SHA256SUMS.txt'), $lines, (New-Object Text.UTF8Encoding($false)))
+          "PACKAGE_DIR=$out" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Install and validate local helper
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & "$env:PACKAGE_DIR\install.ps1" -NoLaunch
+          $health = Invoke-RestMethod -UseBasicParsing -Uri 'https://127.0.0.1:37654/v1/health' -TimeoutSec 10
+          if (-not $health.ok -or $health.platform -ne 'windows' -or -not $health.torReady -or -not $health.controllerReady) { throw 'helper health validation failed' }
+          $base = Join-Path $env:ProgramData 'HighGAS'
+          & (Join-Path $base 'highgas-tor.ps1') self-test
+          if ($LASTEXITCODE -ne 0) { throw 'controller self-test failed' }
+          $token = (Get-Content -Raw (Join-Path $base 'helper.token')).Trim()
+          if ($token.Length -lt 64) { throw 'helper token invalid' }
+          $headers = @{ Authorization = "Bearer $token" }
+          $status = Invoke-RestMethod -UseBasicParsing -Headers $headers -Uri 'https://127.0.0.1:37654/v1/status' -TimeoutSec 10
+          if ($status.connected) { throw 'helper should start disconnected' }
+
+      - name: One-pass real full-tunnel runtime gate
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $base = Join-Path $env:ProgramData 'HighGAS'
+          $token = (Get-Content -Raw (Join-Path $base 'helper.token')).Trim()
+          $headers = @{ Authorization = "Bearer $token" }
+          $baseline = Invoke-RestMethod -UseBasicParsing -Uri 'https://lowgas.vercel.app/api/network-info' -TimeoutSec 15
+          try {
+            $body = @{ server = 'de-fra-01' } | ConvertTo-Json -Compress
+            $connect = Invoke-RestMethod -UseBasicParsing -Headers $headers -ContentType 'application/json' -Method Post -Body $body -Uri 'https://127.0.0.1:37654/v1/connect' -TimeoutSec 260
+            if (-not $connect.ok -or $connect.country -ne 'DE') { throw 'DE connect response invalid' }
+            foreach ($name in @('ip_changed','country','tor_ip_match','ipv6_blocked','tun_adapter','singbox_alive','tor_alive')) {
+              if (-not $connect.checks.$name) { throw "runtime check failed: $name" }
+            }
+            $net = Invoke-RestMethod -UseBasicParsing -Headers $headers -Uri 'https://127.0.0.1:37654/api/network-info' -TimeoutSec 30
+            if ($net.country -ne 'DE') { throw "system tunnel country mismatch: $($net.country)" }
+            if ($baseline.ip -and $net.ip -eq $baseline.ip) { throw 'system public IP did not change' }
+          } finally {
+            try { Invoke-RestMethod -UseBasicParsing -Headers $headers -ContentType 'application/json' -Method Post -Body '{}' -Uri 'https://127.0.0.1:37654/v1/disconnect' -TimeoutSec 60 | Out-Null } catch {}
+          }
+          Start-Sleep -Seconds 2
+          $status = Invoke-RestMethod -UseBasicParsing -Headers $headers -Uri 'https://127.0.0.1:37654/v1/status' -TimeoutSec 10
+          if ($status.connected) { throw 'disconnect did not restore state' }
+          $direct = Invoke-RestMethod -UseBasicParsing -Uri 'https://lowgas.vercel.app/api/network-info' -TimeoutSec 15
+          if (-not $direct.ip) { throw 'direct connectivity was not restored' }
+          Write-Host 'WINDOWS_REAL_FULL_TUNNEL=PASS'
+
+      - name: Uninstall and residue check
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          & "$env:PACKAGE_DIR\uninstall.ps1"
+          Start-Sleep -Seconds 2
+          if (Test-Path (Join-Path $env:ProgramData 'HighGAS')) { throw 'ProgramData residue remains' }
+          $task = schtasks.exe /Query /TN HighGAS-Helper 2>$null
+          if ($LASTEXITCODE -eq 0) { throw 'scheduled task residue remains' }
+          if (Get-Process highgas-helper,sing-box,tor -ErrorAction SilentlyContinue) { throw 'process residue remains' }
+
+      - name: Package ZIP
+        if: success()
+        shell: pwsh
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP 'HighGAS-Final-Windows-x64.zip'
+          Compress-Archive -Path "$env:PACKAGE_DIR\*" -DestinationPath $zip -CompressionLevel Optimal -Force
+          if (-not (Test-Path $zip)) { throw 'ZIP missing' }
+          "ZIP_PATH=$zip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Get-FileHash -Algorithm SHA256 $zip | Format-List
+
+      - uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: HighGAS-Final-Windows-x64
+          path: ${{ env.ZIP_PATH }}
+          if-no-files-found: error
+          retention-days: 30
