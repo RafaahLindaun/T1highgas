@@ -47,6 +47,10 @@ jobs:
           $null = [scriptblock]::Create((Get-Content -Raw windows/highgas-tor.ps1))
           $null = [scriptblock]::Create((Get-Content -Raw windows/install.ps1))
           $null = [scriptblock]::Create((Get-Content -Raw windows/uninstall.ps1))
+          foreach ($f in @('windows/INSTALAR-HIGHGAS-WINDOWS.cmd','windows/DESINSTALAR-HIGHGAS-WINDOWS.cmd')) {
+            if (-not (Test-Path $f)) { throw "delivery launcher missing: $f" }
+            if ((Get-Content -Raw $f) -notmatch 'Verb RunAs') { throw "launcher does not self-elevate: $f" }
+          }
           $script = Get-Content -Raw windows/highgas-tor.ps1
           if ($script -notmatch 'strict_route') { throw 'strict_route missing' }
           if ($script -notmatch 'process_name.*tor.exe') { throw 'tor process bypass missing' }
@@ -94,15 +98,23 @@ jobs:
           Copy-Item public/highgas-local-controller.js (Join-Path $payload 'highgas-local-controller.js')
           Copy-Item windows/install.ps1 (Join-Path $out 'install.ps1')
           Copy-Item windows/uninstall.ps1 (Join-Path $out 'uninstall.ps1')
+          Copy-Item windows/INSTALAR-HIGHGAS-WINDOWS.cmd (Join-Path $out 'INSTALAR-HIGHGAS-WINDOWS.cmd')
+          Copy-Item windows/DESINSTALAR-HIGHGAS-WINDOWS.cmd (Join-Path $out 'DESINSTALAR-HIGHGAS-WINDOWS.cmd')
           Copy-Item windows/README-WINDOWS.txt (Join-Path $out 'README-WINDOWS.txt')
 
           $hashFiles = @(
             (Join-Path $payload 'highgas-helper.exe'),
             (Join-Path $payload 'highgas-tor.ps1'),
+            (Join-Path $payload 'highgas-local-controller.js'),
             (Join-Path $payload 'sing-box\sing-box.exe'),
             (Join-Path $payload 'tor-expert\tor\tor.exe'),
             (Join-Path $payload 'tor-expert\data\geoip'),
-            (Join-Path $payload 'tor-expert\data\geoip6')
+            (Join-Path $payload 'tor-expert\data\geoip6'),
+            (Join-Path $out 'install.ps1'),
+            (Join-Path $out 'uninstall.ps1'),
+            (Join-Path $out 'INSTALAR-HIGHGAS-WINDOWS.cmd'),
+            (Join-Path $out 'DESINSTALAR-HIGHGAS-WINDOWS.cmd'),
+            (Join-Path $out 'README-WINDOWS.txt')
           )
           $lines = foreach ($f in $hashFiles) {
             $h = (Get-FileHash -Algorithm SHA256 $f).Hash.ToLowerInvariant()
@@ -132,6 +144,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $base = Join-Path $env:ProgramData 'HighGAS'
+          $runtime = Join-Path $base 'runtime'
           $token = (Get-Content -Raw (Join-Path $base 'helper.token')).Trim()
           $headers = @{ Authorization = "Bearer $token" }
           $report = Join-Path $env:PACKAGE_DIR 'VALIDATION-20X.txt'
@@ -155,6 +168,25 @@ jobs:
             Start-Sleep -Seconds 1
           }
 
+          function Dump-RuntimeLogs([int]$cycle,[int]$attempt) {
+            foreach ($name in @('tor.log','tor.stderr.log','tor.stdout.log','singbox.stderr.log','singbox.stdout.log')) {
+              $path = Join-Path $runtime $name
+              if (Test-Path $path) {
+                "--- $name cycle=$cycle attempt=$attempt ---" | Tee-Object -FilePath $report -Append | Write-Host
+                Get-Content $path -Tail 80 -ErrorAction SilentlyContinue | Tee-Object -FilePath $report -Append | Write-Host
+              }
+            }
+          }
+
+          function Connect-Once([string]$server) {
+            $body = @{ server = $server } | ConvertTo-Json -Compress
+            $resp = Invoke-WebRequest -UseBasicParsing -SkipHttpErrorCheck -Headers $headers -ContentType 'application/json' -Method Post -Body $body -Uri 'https://127.0.0.1:37654/v1/connect' -TimeoutSec 300
+            if ([int]$resp.StatusCode -lt 200 -or [int]$resp.StatusCode -ge 300) {
+              throw "connect HTTP $($resp.StatusCode) body=$($resp.Content)"
+            }
+            return ($resp.Content | ConvertFrom-Json)
+          }
+
           $baseline = Get-NetworkInfo
           for ($cycle = 1; $cycle -le 20; $cycle++) {
             if (($cycle % 2) -eq 1) { $server = 'de-fra-01'; $expected = 'DE' } else { $server = 'us-mia-01'; $expected = 'US' }
@@ -165,8 +197,7 @@ jobs:
               Disconnect-HighGAS
               "CYCLE=$cycle ATTEMPT=$attempt" | Tee-Object -FilePath $report -Append | Write-Host
               try {
-                $body = @{ server = $server } | ConvertTo-Json -Compress
-                $connect = Invoke-RestMethod -UseBasicParsing -Headers $headers -ContentType 'application/json' -Method Post -Body $body -Uri 'https://127.0.0.1:37654/v1/connect' -TimeoutSec 300
+                $connect = Connect-Once $server
                 if (-not $connect.ok -or $connect.country -ne $expected) { throw 'connect response mismatch' }
                 foreach ($name in @('ip_changed','country','tor_ip_match','ipv6_blocked','tun_adapter','singbox_alive','tor_alive')) {
                   if (-not $connect.checks.$name) { throw "connect check failed: $name" }
@@ -179,7 +210,8 @@ jobs:
                 if ($net.country -ne $expected) { throw "system country mismatch: $($net.country)" }
                 if ($baseline.ip -and $net.ip -eq $baseline.ip) { throw 'system public IP did not change' }
 
-                $ipv6Code = & curl.exe -6 -fsS --connect-timeout 4 --max-time 7 'https://api64.ipify.org' *> $null; $ipv6Exit = $LASTEXITCODE
+                & curl.exe -6 -fsS --connect-timeout 4 --max-time 7 'https://api64.ipify.org' *> $null
+                $ipv6Exit = $LASTEXITCODE
                 if ($ipv6Exit -eq 0) { throw 'IPv6 leak detected' }
                 if (-not (Get-NetAdapter -Name 'HighGAS' -ErrorAction SilentlyContinue)) { throw 'HighGAS TUN adapter missing' }
                 if (-not (Get-Process tor -ErrorAction SilentlyContinue)) { throw 'Tor process missing' }
@@ -190,6 +222,7 @@ jobs:
                 break
               } catch {
                 ('RETRY cycle={0:D2} attempt={1} error={2}' -f $cycle,$attempt,$_.Exception.Message) | Tee-Object -FilePath $report -Append | Write-Host
+                Dump-RuntimeLogs $cycle $attempt
                 Disconnect-HighGAS
                 if ($attempt -lt 5) { Start-Sleep -Seconds 3 }
               }
@@ -224,6 +257,17 @@ jobs:
               if ($actual -ne $expected) { throw "integrity mismatch: $rel" }
             } else { throw "invalid checksum line: $line" }
           }
+
+      - name: Preserve diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: HighGAS-Windows-Diagnostics
+          path: |
+            ${{ env.PACKAGE_DIR }}/VALIDATION-20X.txt
+            C:/ProgramData/HighGAS/runtime/*.log
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Uninstall and residue check
         if: always()
