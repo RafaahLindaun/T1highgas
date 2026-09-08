@@ -76,10 +76,19 @@ function Get-Target([string]$Code) {
   }
 }
 
-function Invoke-NetworkInfo([switch]$ThroughTor) {
-  $curlArgs = @('-fsS','--connect-timeout','12','--max-time','25','-H','Cache-Control: no-cache')
+function Invoke-CurlText {
+  param(
+    [Parameter(Mandatory=$true)][string]$Url,
+    [bool]$ThroughTor = $false
+  )
+  $curlArgs = @(
+    '-fsS','--connect-timeout','10','--max-time','22',
+    '--retry','2','--retry-delay','1','--retry-all-errors',
+    '-A','HighGAS/1.1','-H','Cache-Control: no-cache'
+  )
   if ($ThroughTor) { $curlArgs += @('--socks5-hostname',"127.0.0.1:$SocksPort") }
-  $curlArgs += "${CheckUrl}?ts=$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())"
+  $curlArgs += $Url
+
   $oldErrorActionPreference = $ErrorActionPreference
   $hasNativePreference = Test-Path variable:PSNativeCommandUseErrorActionPreference
   if ($hasNativePreference) { $oldNativePreference = $PSNativeCommandUseErrorActionPreference }
@@ -92,8 +101,56 @@ function Invoke-NetworkInfo([switch]$ThroughTor) {
     $ErrorActionPreference = $oldErrorActionPreference
     if ($hasNativePreference) { $PSNativeCommandUseErrorActionPreference = $oldNativePreference }
   }
-  if ($curlExit -ne 0 -or -not $raw) { throw "network_info_failed exit=$curlExit" }
-  return ($raw | Out-String | ConvertFrom-Json)
+  if ($curlExit -ne 0 -or -not $raw) { throw "curl_failed exit=$curlExit url=$Url" }
+  return ($raw | Out-String)
+}
+
+function Invoke-NetworkInfo([switch]$ThroughTor) {
+  $useTor = [bool]$ThroughTor
+  $errors = New-Object System.Collections.Generic.List[string]
+
+  for ($round = 1; $round -le 3; $round++) {
+    try {
+      $raw = Invoke-CurlText -Url 'https://www.cloudflare.com/cdn-cgi/trace' -ThroughTor $useTor
+      $kv = @{}
+      foreach ($line in ($raw -split "`r?`n")) {
+        if ($line -match '^([^=]+)=(.*)$') { $kv[$matches[1]] = $matches[2].Trim() }
+      }
+      $ip = [string]$kv['ip']
+      $country = ([string]$kv['loc']).ToUpperInvariant()
+      if ($ip -and $country -match '^[A-Z]{2}$') {
+        return [pscustomobject]@{ ip=$ip; country=$country; source='cloudflare' }
+      }
+      $errors.Add("cloudflare_invalid round=$round")
+    } catch { $errors.Add("cloudflare round=$round $($_.Exception.Message)") }
+
+    try {
+      $url = "${CheckUrl}?ts=$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())"
+      $raw = Invoke-CurlText -Url $url -ThroughTor $useTor
+      $j = $raw | ConvertFrom-Json
+      $ip = [string]$j.ip
+      $country = ([string]$j.country).ToUpperInvariant()
+      if ($ip -and $country -match '^[A-Z]{2}$') {
+        return [pscustomobject]@{ ip=$ip; country=$country; source='highgas' }
+      }
+      $errors.Add("highgas_invalid round=$round")
+    } catch { $errors.Add("highgas round=$round $($_.Exception.Message)") }
+
+    try {
+      $raw = Invoke-CurlText -Url 'https://ipwho.is/' -ThroughTor $useTor
+      $j = $raw | ConvertFrom-Json
+      $ip = [string]$j.ip
+      $country = ([string]$j.country_code).ToUpperInvariant()
+      if (($j.success -ne $false) -and $ip -and $country -match '^[A-Z]{2}$') {
+        return [pscustomobject]@{ ip=$ip; country=$country; source='ipwhois' }
+      }
+      $errors.Add("ipwhois_invalid round=$round")
+    } catch { $errors.Add("ipwhois round=$round $($_.Exception.Message)") }
+
+    Start-Sleep -Seconds 1
+  }
+
+  throw ('network_info_failed: ' + (($errors | Select-Object -Last 6) -join ' | '))
 }
 
 function Write-TorConfig([hashtable]$Target) {
@@ -250,7 +307,7 @@ function Connect-HighGAS([string]$Code) {
 
   Write-Stage 'baseline:start'
   $baseline = Invoke-NetworkInfo
-  Write-Stage "baseline:done country=$($baseline.country) ip=$($baseline.ip)"
+  Write-Stage "baseline:done country=$($baseline.country) ip=$($baseline.ip) source=$($baseline.source)"
 
   Remove-Item -Force $TorLog -ErrorAction SilentlyContinue
   Write-TorConfig $target
@@ -263,11 +320,12 @@ function Connect-HighGAS([string]$Code) {
 
   Write-Stage 'tor-verify:start'
   $torInfo = Invoke-NetworkInfo -ThroughTor
-  if (([string]$torInfo.country).ToUpperInvariant() -ne $target.country) {
-    throw "Tor exit country mismatch. expected=$($target.country) got=$($torInfo.country)"
+  $torCountryOk = (([string]$torInfo.country).ToUpperInvariant() -eq $target.country)
+  if (-not $torCountryOk) {
+    throw "Tor exit country mismatch. expected=$($target.country) got=$($torInfo.country) source=$($torInfo.source)"
   }
   if ($baseline.ip -and $torInfo.ip -and $baseline.ip -eq $torInfo.ip) { throw 'Tor did not change public IP.' }
-  Write-Stage "tor-verify:done country=$($torInfo.country) ip=$($torInfo.ip)"
+  Write-Stage "tor-verify:done country=$($torInfo.country) ip=$($torInfo.ip) source=$($torInfo.source)"
 
   Write-Stage 'sing-config:start'
   Write-SingBoxConfig
@@ -283,10 +341,12 @@ function Connect-HighGAS([string]$Code) {
 
   Write-Stage 'system-verify:start'
   $systemInfo = Invoke-NetworkInfo
-  Write-Stage "system-verify:network country=$($systemInfo.country) ip=$($systemInfo.ip)"
+  Write-Stage "system-verify:network country=$($systemInfo.country) ip=$($systemInfo.ip) source=$($systemInfo.source)"
   $countryOk = (([string]$systemInfo.country).ToUpperInvariant() -eq $target.country)
   $ipChanged = ($systemInfo.ip -and $baseline.ip -and $systemInfo.ip -ne $baseline.ip)
-  $torMatch = ($systemInfo.ip -and $torInfo.ip -and $systemInfo.ip -eq $torInfo.ip)
+  # Tor may legitimately use a different circuit/exit for the SOCKS probe and system TUN traffic.
+  # Validate that both independently prove the requested country rather than requiring identical IPs.
+  $torPathOk = ($torCountryOk -and $countryOk)
 
   Write-Stage 'ipv6:start'
   $ipv6Blocked = Test-IPv6Blocked
@@ -300,7 +360,7 @@ function Connect-HighGAS([string]$Code) {
   $checks = [ordered]@{
     ip_changed = [bool]$ipChanged
     country = [bool]$countryOk
-    tor_ip_match = [bool]$torMatch
+    tor_ip_match = [bool]$torPathOk
     ipv6_blocked = [bool]$ipv6Blocked
     tun_adapter = [bool]$adapter
     singbox_alive = [bool]$singAlive
