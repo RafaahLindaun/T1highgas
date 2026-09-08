@@ -146,7 +146,7 @@ function Start-Tor([object]$Physical,[string]$Country,[string]$ExitCode) {
     '--StrictNodes','1',
     '--ClientUseIPv6','0',
     '--OutboundBindAddress',[string]$Physical.IP,
-    '--Log','notice stdout'
+    '--Log','"notice stdout"'
   )
   $p = Start-Process -FilePath $TorExe -ArgumentList $args -WindowStyle Hidden -PassThru -RedirectStandardOutput $TorLog -RedirectStandardError (Join-Path $Runtime 'tor-error.log')
   for ($i=0;$i -lt 360;$i++) {
