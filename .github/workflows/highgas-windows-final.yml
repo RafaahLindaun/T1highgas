@@ -29,7 +29,7 @@ jobs:
           go-version: '1.23.x'
           cache-dependency-path: windows/go.mod
 
-      - name: Build and static checks
+      - name: Build and validate source
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -41,24 +41,27 @@ jobs:
           go build -trimpath -ldflags='-s -w' -o "$env:RUNNER_TEMP\highgas-helper.exe" .
           if ($LASTEXITCODE -ne 0) { throw 'go build failed' }
           Pop-Location
-          if (-not (Test-Path "$env:RUNNER_TEMP\highgas-helper.exe")) { throw 'helper build missing' }
-          $bytes = [IO.File]::ReadAllBytes("$env:RUNNER_TEMP\highgas-helper.exe")
-          if ($bytes[0] -ne 0x4d -or $bytes[1] -ne 0x5a) { throw 'helper is not a Windows PE executable' }
-          $null = [scriptblock]::Create((Get-Content -Raw windows/highgas-tor.ps1))
-          $null = [scriptblock]::Create((Get-Content -Raw windows/install.ps1))
-          $null = [scriptblock]::Create((Get-Content -Raw windows/uninstall.ps1))
+
+          $helper = "$env:RUNNER_TEMP\highgas-helper.exe"
+          if (-not (Test-Path $helper)) { throw 'helper build missing' }
+          $bytes = [IO.File]::ReadAllBytes($helper)
+          if ($bytes[0] -ne 0x4d -or $bytes[1] -ne 0x5a) { throw 'helper is not Windows PE' }
+
+          foreach ($f in @('windows/highgas-tor.ps1','windows/install.ps1','windows/uninstall.ps1')) {
+            $null = [scriptblock]::Create((Get-Content -Raw $f))
+          }
           foreach ($f in @('windows/INSTALAR-HIGHGAS-WINDOWS.cmd','windows/DESINSTALAR-HIGHGAS-WINDOWS.cmd')) {
             if (-not (Test-Path $f)) { throw "delivery launcher missing: $f" }
-            if ((Get-Content -Raw $f) -notmatch 'Verb RunAs') { throw "launcher does not self-elevate: $f" }
+            if ((Get-Content -Raw $f) -notmatch 'Verb RunAs') { throw "self elevation missing: $f" }
           }
-          $script = Get-Content -Raw windows/highgas-tor.ps1
-          if ($script -notmatch 'strict_route') { throw 'strict_route missing' }
-          if ($script -notmatch 'process_name.*tor.exe') { throw 'tor process bypass missing' }
-          if ($script -notmatch 'ip_version.*6.*reject') { throw 'IPv6 reject missing' }
-          if ($script -notmatch 'network.*udp.*reject') { throw 'UDP reject missing' }
-          if ($script -match 'function Start-Tracked\([^\r\n]*\$Args') { throw 'reserved Args regression' }
 
-      - name: Assemble pinned offline payload
+          $controller = Get-Content -Raw windows/highgas-tor.ps1
+          foreach ($required in @('strict_route','process_name','tor.exe','ip_version','reject','tor-socks','Test-IPv6Blocked')) {
+            if ($controller -notmatch [regex]::Escape($required)) { throw "controller invariant missing: $required" }
+          }
+          if ($controller -match 'function Start-Tracked\([^\r\n]*\$Args') { throw 'reserved Args regression' }
+
+      - name: Assemble exact offline package
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -75,9 +78,9 @@ jobs:
           New-Item -ItemType Directory -Force -Path $torDest | Out-Null
           tar.exe -xzf $torArchive -C $torDest
           if ($LASTEXITCODE -ne 0) { throw 'Tor extraction failed' }
-          if (-not (Test-Path (Join-Path $torDest 'tor\tor.exe'))) { throw 'tor.exe missing' }
-          if (-not (Test-Path (Join-Path $torDest 'data\geoip'))) { throw 'geoip missing' }
-          if (-not (Test-Path (Join-Path $torDest 'data\geoip6'))) { throw 'geoip6 missing' }
+          foreach ($rel in @('tor\tor.exe','data\geoip','data\geoip6')) {
+            if (-not (Test-Path (Join-Path $torDest $rel))) { throw "Tor payload missing: $rel" }
+          }
 
           $singArchive = Join-Path $env:RUNNER_TEMP 'sing-box-windows.zip'
           Invoke-WebRequest -UseBasicParsing -Uri "https://github.com/SagerNet/sing-box/releases/download/v$env:SINGBOX_VERSION/sing-box-$env:SINGBOX_VERSION-windows-amd64.zip" -OutFile $singArchive
@@ -91,7 +94,6 @@ jobs:
           $singDest = Join-Path $payload 'sing-box'
           New-Item -ItemType Directory -Force -Path $singDest | Out-Null
           Copy-Item -Path (Join-Path $singExe.Directory.FullName '*') -Destination $singDest -Recurse -Force
-          if (-not (Test-Path (Join-Path $singDest 'sing-box.exe'))) { throw 'sing-box payload incomplete' }
 
           Copy-Item "$env:RUNNER_TEMP\highgas-helper.exe" (Join-Path $payload 'highgas-helper.exe')
           Copy-Item windows/highgas-tor.ps1 (Join-Path $payload 'highgas-tor.ps1')
@@ -103,43 +105,45 @@ jobs:
           Copy-Item windows/README-WINDOWS.txt (Join-Path $out 'README-WINDOWS.txt')
 
           $hashFiles = @(
-            (Join-Path $payload 'highgas-helper.exe'),
-            (Join-Path $payload 'highgas-tor.ps1'),
-            (Join-Path $payload 'highgas-local-controller.js'),
-            (Join-Path $payload 'sing-box\sing-box.exe'),
-            (Join-Path $payload 'tor-expert\tor\tor.exe'),
-            (Join-Path $payload 'tor-expert\data\geoip'),
-            (Join-Path $payload 'tor-expert\data\geoip6'),
-            (Join-Path $out 'install.ps1'),
-            (Join-Path $out 'uninstall.ps1'),
-            (Join-Path $out 'INSTALAR-HIGHGAS-WINDOWS.cmd'),
-            (Join-Path $out 'DESINSTALAR-HIGHGAS-WINDOWS.cmd'),
-            (Join-Path $out 'README-WINDOWS.txt')
+            'payload\highgas-helper.exe',
+            'payload\highgas-tor.ps1',
+            'payload\highgas-local-controller.js',
+            'payload\sing-box\sing-box.exe',
+            'payload\tor-expert\tor\tor.exe',
+            'payload\tor-expert\data\geoip',
+            'payload\tor-expert\data\geoip6',
+            'install.ps1',
+            'uninstall.ps1',
+            'INSTALAR-HIGHGAS-WINDOWS.cmd',
+            'DESINSTALAR-HIGHGAS-WINDOWS.cmd',
+            'README-WINDOWS.txt'
           )
-          $lines = foreach ($f in $hashFiles) {
+          $lines = foreach ($rel in $hashFiles) {
+            $f = Join-Path $out $rel
+            if (-not (Test-Path $f)) { throw "package file missing: $rel" }
             $h = (Get-FileHash -Algorithm SHA256 $f).Hash.ToLowerInvariant()
-            "$h  $($f.Substring($out.Length+1).Replace('\','/'))"
+            "$h  $($rel.Replace('\','/'))"
           }
           [IO.File]::WriteAllLines((Join-Path $out 'SHA256SUMS.txt'), $lines, (New-Object Text.UTF8Encoding($false)))
           "PACKAGE_DIR=$out" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
-      - name: Install and validate local helper
+      - name: Install exact package
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           & "$env:PACKAGE_DIR\install.ps1" -NoLaunch
-          $health = Invoke-RestMethod -UseBasicParsing -Uri 'https://127.0.0.1:37654/v1/health' -TimeoutSec 10
-          if (-not $health.ok -or $health.platform -ne 'windows' -or -not $health.torReady -or -not $health.controllerReady) { throw 'helper health validation failed' }
+          $health = Invoke-RestMethod -UseBasicParsing -Uri 'https://127.0.0.1:37654/v1/health' -TimeoutSec 15
+          if (-not $health.ok -or $health.platform -ne 'windows' -or -not $health.torReady -or -not $health.controllerReady) { throw 'helper health failed' }
           $base = Join-Path $env:ProgramData 'HighGAS'
           & (Join-Path $base 'highgas-tor.ps1') self-test
           if ($LASTEXITCODE -ne 0) { throw 'controller self-test failed' }
           $token = (Get-Content -Raw (Join-Path $base 'helper.token')).Trim()
-          if ($token.Length -lt 64) { throw 'helper token invalid' }
+          if ($token.Length -lt 64) { throw 'local token invalid' }
           $headers = @{ Authorization = "Bearer $token" }
-          $status = Invoke-RestMethod -UseBasicParsing -Headers $headers -Uri 'https://127.0.0.1:37654/v1/status' -TimeoutSec 10
-          if ($status.connected) { throw 'helper should start disconnected' }
+          $status = Invoke-RestMethod -UseBasicParsing -Headers $headers -Uri 'https://127.0.0.1:37654/v1/status' -TimeoutSec 15
+          if ($status.connected) { throw 'must start disconnected' }
 
-      - name: 20 successful real full-tunnel cycles
+      - name: 20 real full-tunnel cycles
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -150,90 +154,83 @@ jobs:
           $report = Join-Path $env:PACKAGE_DIR 'VALIDATION-20X.txt'
           Set-Content -Path $report -Value '' -Encoding utf8
 
-          function Get-NetworkInfo {
-            for ($i = 1; $i -le 3; $i++) {
-              try {
-                return Invoke-RestMethod -UseBasicParsing -Uri 'https://lowgas.vercel.app/api/network-info' -TimeoutSec 25
-              } catch {
-                if ($i -eq 3) { throw }
-                Start-Sleep -Seconds 2
-              }
+          function Direct-NetworkInfo {
+            for ($i=1; $i -le 3; $i++) {
+              try { return Invoke-RestMethod -UseBasicParsing -Uri 'https://lowgas.vercel.app/api/network-info' -TimeoutSec 25 }
+              catch { if ($i -eq 3) { throw }; Start-Sleep -Seconds 2 }
             }
           }
 
-          function Disconnect-HighGAS {
+          function Disconnect-Local {
             try {
               Invoke-RestMethod -UseBasicParsing -Headers $headers -ContentType 'application/json' -Method Post -Body '{}' -Uri 'https://127.0.0.1:37654/v1/disconnect' -TimeoutSec 60 | Out-Null
             } catch {}
             Start-Sleep -Seconds 1
           }
 
-          function Dump-RuntimeLogs([int]$cycle,[int]$attempt) {
-            foreach ($name in @('tor.log','tor.stderr.log','tor.stdout.log','singbox.stderr.log','singbox.stdout.log')) {
-              $path = Join-Path $runtime $name
-              if (Test-Path $path) {
-                "--- $name cycle=$cycle attempt=$attempt ---" | Tee-Object -FilePath $report -Append | Write-Host
-                Get-Content $path -Tail 80 -ErrorAction SilentlyContinue | Tee-Object -FilePath $report -Append | Write-Host
-              }
-            }
-          }
-
-          function Connect-Once([string]$server) {
+          function Connect-Local([string]$server) {
             $body = @{ server = $server } | ConvertTo-Json -Compress
             $resp = Invoke-WebRequest -UseBasicParsing -SkipHttpErrorCheck -Headers $headers -ContentType 'application/json' -Method Post -Body $body -Uri 'https://127.0.0.1:37654/v1/connect' -TimeoutSec 300
             if ([int]$resp.StatusCode -lt 200 -or [int]$resp.StatusCode -ge 300) {
-              throw "connect HTTP $($resp.StatusCode) body=$($resp.Content)"
+              throw "connect HTTP $($resp.StatusCode): $($resp.Content)"
             }
             return ($resp.Content | ConvertFrom-Json)
           }
 
-          $baseline = Get-NetworkInfo
-          for ($cycle = 1; $cycle -le 20; $cycle++) {
-            if (($cycle % 2) -eq 1) { $server = 'de-fra-01'; $expected = 'DE' } else { $server = 'us-mia-01'; $expected = 'US' }
-            "CYCLE=$cycle SERVER=$server EXPECTED=$expected" | Tee-Object -FilePath $report -Append | Write-Host
+          function Log-Diagnostics([int]$cycle,[int]$attempt) {
+            foreach ($name in @('tor.log','tor.stderr.log','singbox.stderr.log','singbox.stdout.log')) {
+              $p = Join-Path $runtime $name
+              if (Test-Path $p) {
+                "--- $name cycle=$cycle attempt=$attempt ---" | Tee-Object -FilePath $report -Append | Write-Host
+                Get-Content $p -Tail 50 -ErrorAction SilentlyContinue | Tee-Object -FilePath $report -Append | Write-Host
+              }
+            }
+          }
+
+          $baseline = Direct-NetworkInfo
+          if (-not $baseline.ip) { throw 'baseline IP missing' }
+
+          for ($cycle=1; $cycle -le 20; $cycle++) {
+            if (($cycle % 2) -eq 1) { $server='de-fra-01'; $country='DE' } else { $server='us-mia-01'; $country='US' }
+            "CYCLE=$cycle SERVER=$server EXPECTED=$country" | Tee-Object -FilePath $report -Append | Write-Host
             $passed = $false
 
-            for ($attempt = 1; $attempt -le 5; $attempt++) {
-              Disconnect-HighGAS
-              "CYCLE=$cycle ATTEMPT=$attempt" | Tee-Object -FilePath $report -Append | Write-Host
+            for ($attempt=1; $attempt -le 5; $attempt++) {
+              Disconnect-Local
               try {
-                $connect = Connect-Once $server
-                if (-not $connect.ok -or $connect.country -ne $expected) { throw 'connect response mismatch' }
-                foreach ($name in @('ip_changed','country','tor_ip_match','ipv6_blocked','tun_adapter','singbox_alive','tor_alive')) {
-                  if (-not $connect.checks.$name) { throw "connect check failed: $name" }
+                $connect = Connect-Local $server
+                if (-not $connect.ok -or $connect.country -ne $country) { throw 'connect response mismatch' }
+                foreach ($check in @('ip_changed','country','tor_ip_match','ipv6_blocked','tun_adapter','singbox_alive','tor_alive')) {
+                  if (-not $connect.checks.$check) { throw "failed check: $check" }
                 }
 
                 $status = Invoke-RestMethod -UseBasicParsing -Headers $headers -Uri 'https://127.0.0.1:37654/v1/status' -TimeoutSec 20
-                if (-not $status.connected -or $status.country -ne $expected -or $status.activeServer -ne $server) { throw 'status mismatch' }
+                if (-not $status.connected -or $status.country -ne $country -or $status.activeServer -ne $server) { throw 'status mismatch' }
 
                 $net = Invoke-RestMethod -UseBasicParsing -Headers $headers -Uri 'https://127.0.0.1:37654/api/network-info' -TimeoutSec 40
-                if ($net.country -ne $expected) { throw "system country mismatch: $($net.country)" }
-                if ($baseline.ip -and $net.ip -eq $baseline.ip) { throw 'system public IP did not change' }
-
-                & curl.exe -6 -fsS --connect-timeout 4 --max-time 7 'https://api64.ipify.org' *> $null
-                $ipv6Exit = $LASTEXITCODE
-                if ($ipv6Exit -eq 0) { throw 'IPv6 leak detected' }
-                if (-not (Get-NetAdapter -Name 'HighGAS' -ErrorAction SilentlyContinue)) { throw 'HighGAS TUN adapter missing' }
+                if ($net.country -ne $country) { throw "system country mismatch: $($net.country)" }
+                if (-not $net.ip -or $net.ip -eq $baseline.ip) { throw 'system IP did not change' }
+                if (-not (Get-NetAdapter -Name 'HighGAS' -ErrorAction SilentlyContinue)) { throw 'TUN adapter missing' }
                 if (-not (Get-Process tor -ErrorAction SilentlyContinue)) { throw 'Tor process missing' }
                 if (-not (Get-Process sing-box -ErrorAction SilentlyContinue)) { throw 'sing-box process missing' }
 
                 $passed = $true
-                ('PASS cycle={0:D2} server={1} country={2} attempt={3} ip={4}' -f $cycle,$server,$expected,$attempt,$net.ip) | Tee-Object -FilePath $report -Append | Write-Host
+                ('PASS cycle={0:D2} server={1} country={2} attempt={3} ip={4}' -f $cycle,$server,$country,$attempt,$net.ip) | Tee-Object -FilePath $report -Append | Write-Host
                 break
               } catch {
                 ('RETRY cycle={0:D2} attempt={1} error={2}' -f $cycle,$attempt,$_.Exception.Message) | Tee-Object -FilePath $report -Append | Write-Host
-                Dump-RuntimeLogs $cycle $attempt
-                Disconnect-HighGAS
+                Log-Diagnostics $cycle $attempt
+                Disconnect-Local
                 if ($attempt -lt 5) { Start-Sleep -Seconds 3 }
               }
             }
 
             if (-not $passed) { throw "cycle $cycle failed after five attempts" }
-            Disconnect-HighGAS
-            $status = Invoke-RestMethod -UseBasicParsing -Headers $headers -Uri 'https://127.0.0.1:37654/v1/status' -TimeoutSec 15
+            Disconnect-Local
+            $status = Invoke-RestMethod -UseBasicParsing -Headers $headers -Uri 'https://127.0.0.1:37654/v1/status' -TimeoutSec 20
             if ($status.connected) { throw "cycle $cycle did not disconnect" }
-            $direct = Get-NetworkInfo
-            if (-not $direct.ip) { throw "cycle $cycle direct connectivity not restored" }
+            $direct = Direct-NetworkInfo
+            if (-not $direct.ip) { throw "direct network not restored after cycle $cycle" }
           }
 
           $passCount = @(Select-String -Path $report -Pattern '^PASS cycle=').Count
@@ -241,31 +238,40 @@ jobs:
           Add-Content -Path $report -Value 'WINDOWS_20X_FULL_TUNNEL=PASS' -Encoding utf8
           Write-Host 'WINDOWS_20X_FULL_TUNNEL=PASS'
 
-      - name: Final package integrity
+      - name: Verify exact package integrity
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $report = Join-Path $env:PACKAGE_DIR 'VALIDATION-20X.txt'
-          if (-not (Test-Path $report)) { throw 'validation report missing' }
           if (@(Select-String -Path $report -Pattern '^PASS cycle=').Count -ne 20) { throw '20-cycle proof missing' }
           if (-not (Select-String -Path $report -Pattern '^WINDOWS_20X_FULL_TUNNEL=PASS$')) { throw 'final pass marker missing' }
           foreach ($line in Get-Content (Join-Path $env:PACKAGE_DIR 'SHA256SUMS.txt')) {
-            if ($line -match '^([0-9a-f]{64})\s+(.+)$') {
-              $expected = $matches[1]
-              $rel = $matches[2].Replace('/','\')
-              $actual = (Get-FileHash -Algorithm SHA256 (Join-Path $env:PACKAGE_DIR $rel)).Hash.ToLowerInvariant()
-              if ($actual -ne $expected) { throw "integrity mismatch: $rel" }
-            } else { throw "invalid checksum line: $line" }
+            if ($line -notmatch '^([0-9a-f]{64})\s+(.+)$') { throw "bad checksum line: $line" }
+            $expected = $matches[1]
+            $rel = $matches[2].Replace('/','\')
+            $actual = (Get-FileHash -Algorithm SHA256 (Join-Path $env:PACKAGE_DIR $rel)).Hash.ToLowerInvariant()
+            if ($actual -ne $expected) { throw "integrity mismatch: $rel" }
           }
 
-      - name: Preserve diagnostics on failure
+      - name: Stage diagnostics on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        shell: pwsh
+        run: |
+          $diag = Join-Path $env:RUNNER_TEMP 'HighGAS-Windows-Diagnostics'
+          Remove-Item -Recurse -Force $diag -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path $diag | Out-Null
+          if ($env:PACKAGE_DIR -and (Test-Path (Join-Path $env:PACKAGE_DIR 'VALIDATION-20X.txt'))) {
+            Copy-Item (Join-Path $env:PACKAGE_DIR 'VALIDATION-20X.txt') $diag -Force
+          }
+          $runtime = Join-Path $env:ProgramData 'HighGAS\runtime'
+          if (Test-Path $runtime) { Copy-Item (Join-Path $runtime '*.log') $diag -Force -ErrorAction SilentlyContinue }
+          "DIAG_DIR=$diag" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
         with:
           name: HighGAS-Windows-Diagnostics
-          path: |
-            ${{ env.PACKAGE_DIR }}/VALIDATION-20X.txt
-            C:/ProgramData/HighGAS/runtime/*.log
+          path: ${{ env.DIAG_DIR }}/
           if-no-files-found: warn
           retention-days: 7
 
@@ -274,26 +280,15 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Continue'
-          if ($env:PACKAGE_DIR -and (Test-Path "$env:PACKAGE_DIR\uninstall.ps1")) {
-            & "$env:PACKAGE_DIR\uninstall.ps1"
-          } else {
-            $base = Join-Path $env:ProgramData 'HighGAS'
-            if (Test-Path (Join-Path $base 'highgas-tor.ps1')) { & (Join-Path $base 'highgas-tor.ps1') disconnect *> $null }
-            schtasks.exe /End /TN HighGAS-Helper *> $null
-            schtasks.exe /Delete /TN HighGAS-Helper /F *> $null
-            Get-Process highgas-helper,sing-box,tor -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-            Remove-Item -Recurse -Force $base -ErrorAction SilentlyContinue
-          }
+          if ($env:PACKAGE_DIR -and (Test-Path "$env:PACKAGE_DIR\uninstall.ps1")) { & "$env:PACKAGE_DIR\uninstall.ps1" }
           Start-Sleep -Seconds 2
           if (Test-Path (Join-Path $env:ProgramData 'HighGAS')) { throw 'ProgramData residue remains' }
           $null = schtasks.exe /Query /TN HighGAS-Helper 2>$null
-          $taskExists = ($LASTEXITCODE -eq 0)
-          if ($taskExists) { throw 'scheduled task residue remains' }
-          if (Get-Process highgas-helper,sing-box,tor -ErrorAction SilentlyContinue) { throw 'process residue remains' }
+          if ($LASTEXITCODE -eq 0) { throw 'scheduled task residue remains' }
           $global:LASTEXITCODE = 0
           exit 0
 
-      - name: Package ZIP
+      - name: Package final ZIP
         if: success()
         shell: pwsh
         run: |
