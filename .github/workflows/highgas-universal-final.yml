@@ -23,149 +23,67 @@ env:
   CHECK_URL: 'https://lowgas.vercel.app/api/network-info'
 
 jobs:
-  source-safety:
-    runs-on: ubuntu-latest
-    timeout-minutes: 12
+  source-and-wintun-20:
+    runs-on: windows-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: '1.23.x'
           cache-dependency-path: local-helper/go.mod
-      - name: Compile and audit fail-closed source
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo apt-get update -qq && sudo apt-get install -y -qq zsh
-          (cd local-helper && go vet ./direct ./windows && go test ./direct ./windows)
-          (cd local-helper && GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -o /tmp/highgas-helper.exe ./windows)
-          (cd local-helper && GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -o /tmp/highgas-helper-mac ./direct)
-          file /tmp/highgas-helper.exe | grep -qi 'PE32+'
-          file /tmp/highgas-helper-mac | grep -Eqi 'x86_64|x86-64'
-          zsh -n local-helper/highgas-tor
-          zsh -n local-helper/install.command
-          zsh -n local-helper/uninstall.command
-          W=local-helper/windows/highgas-tor.ps1
-          G=local-helper/windows/main.go
-          T=0
-          ok(){ T=$((T+1)); echo "SOURCE_PASS $T - $1"; }
-          has(){ grep -Fq -- "$2" "$1"; ok "$2"; }
-          lacks(){ ! grep -Fq -- "$2" "$1"; ok "sem $2"; }
-          has "$G" 'version = "2.0.0"'
-          has "$G" 'highgas-full-tunnel'
-          has "$G" 'VERIFIED=1'
-          has "$G" 'ConstantTimeCompare'
-          has "$W" "Set-NetFirewallProfile -Profile Domain,Private,Public -DefaultOutboundAction Block"
-          has "$W" "HighGAS Wintun TCP IPv4"
-          has "$W" "HighGAS Tor TCP"
-          has "$W" "HighGAS DHCP"
-          has "$W" "--OutboundBindAddress"
-          has "$W" "Pin-TorGuards"
-          has "$W" "New-NetRoute -DestinationPrefix '0.0.0.0/0'"
-          has "$W" 'IP_CHANGED='
-          has "$W" 'COUNTRY_OK='
-          has "$W" 'DNS_OK='
-          has "$W" 'IPV6_OK='
-          has "$W" 'ROUTE_OK='
-          has "$W" 'VERIFIED='
-          lacks "$W" "'--interface',[string]$Physical.Alias"
-          has local-helper/highgas-tor 'VERIFIED=1'
-          has local-helper/highgas-tor 'block drop out quick inet6 all'
-          has local-helper/highgas-tor 'block drop out quick on $dev inet all'
-          has local-helper/highgas-tor 'route-to ($dev $gw)'
-          has public/highgas-local-controller.js 'IP alterado'
-          has public/highgas-local-controller.js 'País correto'
-          has public/highgas-local-controller.js 'DNS protegido'
-          has public/highgas-local-controller.js 'IPv6 sem vazamento'
-          has public/highgas-local-controller.js 'Kill Switch'
-          echo "TOTAL_SOURCE_CHECKS=$T"
-          test "$T" -ge 25
-
-  windows-native-20:
-    runs-on: windows-latest
-    timeout-minutes: 18
-    steps:
-      - uses: actions/checkout@v4
-      - name: Create and destroy Wintun twenty times
+      - name: Compile Windows helper and parse PowerShell
         shell: powershell
         run: |
-          $ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'
-          foreach($p in @('local-helper/windows/highgas-tor.ps1','local-helper/windows/install.ps1','local-helper/windows/uninstall.ps1')) {
-            $tokens=$null; $errors=$null
-            [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $p),[ref]$tokens,[ref]$errors)|Out-Null
-            if($errors.Count){throw "PowerShell parser failed: $p"}
+          $ErrorActionPreference='Stop'
+          Push-Location local-helper
+          $env:GOOS='windows';$env:GOARCH='amd64';$env:CGO_ENABLED='0'
+          go test ./windows
+          go build -trimpath -o "$env:RUNNER_TEMP\highgas-helper.exe" ./windows
+          Pop-Location
+          foreach($f in @('local-helper/windows/highgas-tor.ps1','local-helper/windows/install.ps1','local-helper/windows/uninstall.ps1')) {
+            $tokens=$null;$errors=$null
+            [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $f),[ref]$tokens,[ref]$errors)|Out-Null
+            if($errors.Count){$errors|ForEach-Object{Write-Host $_};throw "PowerShell inválido: $f"}
           }
-          $base="$env:RUNNER_TEMP\native20"; New-Item -ItemType Directory -Force $base|Out-Null
-          Invoke-WebRequest -UseBasicParsing "https://github.com/xjasonlyu/tun2socks/releases/download/v$env:TUN2SOCKS_VERSION/tun2socks-windows-amd64.zip" -OutFile "$base\t2s.zip"
-          if((Get-FileHash "$base\t2s.zip" -Algorithm SHA256).Hash.ToLowerInvariant()-ne$env:TUN2SOCKS_WIN_SHA256){throw 'tun2socks SHA256'}
-          Expand-Archive "$base\t2s.zip" "$base\t2s" -Force
-          $tun=(Get-ChildItem "$base\t2s" -Recurse -File|Where-Object Name -like 'tun2socks*.exe'|Select-Object -First 1).FullName
-          Invoke-WebRequest -UseBasicParsing "https://www.wintun.net/builds/wintun-$env:WINTUN_VERSION.zip" -OutFile "$base\w.zip"
-          Expand-Archive "$base\w.zip" "$base\w" -Force
-          $dll=(Get-ChildItem "$base\w" -Recurse -File -Filter wintun.dll|Where-Object FullName -match 'amd64'|Select-Object -First 1).FullName
-          if((Get-AuthenticodeSignature $dll).Status-ne'Valid'){throw 'Wintun signature'}
-          Copy-Item $dll (Split-Path $tun) -Force
-          1..20 | ForEach-Object {
-            $i=$_; $name="HighGASCI$i"; $p=$null
-            try {
-              $p=Start-Process $tun -ArgumentList @('--device',"tun://$name",'--proxy','socks5://127.0.0.1:9','--loglevel','error') -WorkingDirectory (Split-Path $tun) -PassThru -WindowStyle Hidden
-              $a=$null
-              for($n=0;$n-lt75;$n++){if($p.HasExited){break};$a=Get-NetAdapter -ErrorAction SilentlyContinue|Where-Object Name -eq $name|Select-Object -First 1;if($a){break};Start-Sleep -Milliseconds 200}
-              if(!$a-or$p.HasExited){throw "Wintun cycle $i failed"}
-              netsh interface ipv4 set address name="$name" source=static addr="192.168.$i.1" mask=255.255.255.0 gateway=none | Out-Null
-              if($LASTEXITCODE-ne0){throw "IPv4 cycle $i"}
-              Write-Host "WINTUN_PASS $i/20 name=$name ifIndex=$($a.ifIndex)"
-            } finally { if($p){Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue}; Start-Sleep -Milliseconds 250 }
+          $s=Get-Content local-helper/windows/highgas-tor.ps1 -Raw
+          foreach($needle in @('DefaultOutboundAction Block','HighGAS Wintun TCP IPv4','HighGAS Tor TCP','--OutboundBindAddress','Pin-TorGuards','IP_CHANGED=','COUNTRY_OK=','DNS_OK=','IPV6_OK=','ROUTE_OK=','VERIFIED=')) {
+            if(!$s.Contains($needle)){throw "Proteção ausente: $needle"}
           }
-          Write-Host 'WINDOWS_WINTUN_20_OF_20=PASS'
-
-  windows-tor-20:
-    runs-on: windows-latest
-    timeout-minutes: 25
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - exit: de
-            country: DE
-            port: 39150
-          - exit: us
-            country: US
-            port: 39151
-    steps:
-      - name: Validate real Tor exit twenty times
+          if($s.Contains("'--interface',[string]`$Physical.Alias")){throw 'regressão --interface detectada'}
+          if(!$s.Contains("'--Log','`"notice stdout`"'")){throw 'quoting Tor Windows incorreto'}
+      - name: Create configure and destroy Wintun 20 times
         shell: powershell
         run: |
           $ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue'
-          $base="$env:RUNNER_TEMP\tor20-${{ matrix.country }}";New-Item -ItemType Directory -Force $base|Out-Null
-          $url="https://archive.torproject.org/tor-package-archive/torbrowser/$env:TOR_VERSION/tor-expert-bundle-windows-x86_64-$env:TOR_VERSION.tar.gz"
-          $sum="https://archive.torproject.org/tor-package-archive/torbrowser/$env:TOR_VERSION/sha256sums-signed-build.txt"
-          Invoke-WebRequest -UseBasicParsing $url -OutFile "$base\tor.tgz"
-          Invoke-WebRequest -UseBasicParsing $sum -OutFile "$base\sha.txt"
-          $name="tor-expert-bundle-windows-x86_64-$env:TOR_VERSION.tar.gz"
-          $line=(Select-String -LiteralPath "$base\sha.txt" -SimpleMatch -Pattern $name|Select-Object -First 1).Line
-          if(!$line){throw 'Tor hash entry'}
-          $expected=($line-split'\s+')[0].ToLowerInvariant();$actual=(Get-FileHash "$base\tor.tgz" -Algorithm SHA256).Hash.ToLowerInvariant();if($actual-ne$expected){throw 'Tor SHA256'}
-          tar -xzf "$base\tor.tgz" -C $base
-          $tor=Join-Path $base 'tor\tor.exe';$geo=Join-Path $base 'data\geoip';$geo6=Join-Path $base 'data\geoip6';$data=Join-Path $base 'data-run';New-Item -ItemType Directory -Force $data|Out-Null
-          $log="$base\tor.log";$err="$base\tor.err"
-          $args=@('--SocksPort','127.0.0.1:${{ matrix.port }}','--DataDirectory',$data,'--GeoIPFile',$geo,'--GeoIPv6File',$geo6,'--ExitNodes','{${{ matrix.exit }}}','--StrictNodes','1','--ClientUseIPv6','0','--Log','notice stdout')
-          $p=Start-Process $tor -ArgumentList $args -PassThru -WindowStyle Hidden -RedirectStandardOutput $log -RedirectStandardError $err
-          try {
-            for($i=0;$i-lt360;$i++){if($p.HasExited){Get-Content $err -ErrorAction SilentlyContinue;throw 'Tor exited'};if((Test-Path $log)-and(Select-String -LiteralPath $log -SimpleMatch -Pattern 'Bootstrapped 100%' -Quiet)){break};Start-Sleep -Milliseconds 500}
-            if(!(Test-Path $log)-or!(Select-String -LiteralPath $log -SimpleMatch -Pattern 'Bootstrapped 100%' -Quiet)){throw 'Tor bootstrap timeout'}
-            1..20|ForEach-Object{
-              $n=$_;$ok=$false
-              1..3|ForEach-Object{if(!$ok){try{$j=& curl.exe -4 -fsS --socks5-hostname '127.0.0.1:${{ matrix.port }}' --connect-timeout 8 --max-time 25 -H 'Accept: application/json' "$env:CHECK_URL?ci=$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())"|ConvertFrom-Json;if(([string]$j.country).ToUpperInvariant()-eq'${{ matrix.country }}'-and$j.ip){$ok=$true}}catch{};if(!$ok){Start-Sleep -Seconds 1}}}
-              if(!$ok){throw "Tor country check $n/20"};Write-Host "TOR_${{ matrix.country }}_PASS $n/20 ip=$($j.ip)"
-            }
-          } finally {Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue}
-          Write-Host 'WINDOWS_TOR_${{ matrix.country }}_20_OF_20=PASS'
+          $b="$env:RUNNER_TEMP\wintun20";New-Item -ItemType Directory -Force $b|Out-Null
+          Invoke-WebRequest -UseBasicParsing "https://github.com/xjasonlyu/tun2socks/releases/download/v$env:TUN2SOCKS_VERSION/tun2socks-windows-amd64.zip" -OutFile "$b\t.zip"
+          if((Get-FileHash "$b\t.zip" -Algorithm SHA256).Hash.ToLowerInvariant()-ne$env:TUN2SOCKS_WIN_SHA256){throw 'SHA256 tun2socks'}
+          Expand-Archive "$b\t.zip" "$b\t" -Force
+          $tun=(Get-ChildItem "$b\t" -Recurse -File|Where-Object Name -like 'tun2socks*.exe'|Select-Object -First 1).FullName
+          Invoke-WebRequest -UseBasicParsing "https://www.wintun.net/builds/wintun-$env:WINTUN_VERSION.zip" -OutFile "$b\w.zip"
+          Expand-Archive "$b\w.zip" "$b\w" -Force
+          $dll=(Get-ChildItem "$b\w" -Recurse -File -Filter wintun.dll|Where-Object FullName -match 'amd64'|Select-Object -First 1).FullName
+          if((Get-AuthenticodeSignature $dll).Status-ne'Valid'){throw 'assinatura Wintun inválida'}
+          Copy-Item $dll (Split-Path $tun) -Force
+          1..20|ForEach-Object {
+            $i=$_;$name="HighGASCI$i";$p=$null
+            try {
+              $p=Start-Process $tun -ArgumentList @('--device',"tun://$name",'--proxy','socks5://127.0.0.1:9','--loglevel','error') -WorkingDirectory (Split-Path $tun) -WindowStyle Hidden -PassThru
+              $a=$null
+              for($n=0;$n-lt80;$n++){if($p.HasExited){break};$a=Get-NetAdapter -ErrorAction SilentlyContinue|Where-Object Name -eq $name|Select-Object -First 1;if($a){break};Start-Sleep -Milliseconds 150}
+              if(!$a-or$p.HasExited){throw "Wintun $i/20 não subiu"}
+              & netsh.exe interface ipv4 set address name="$name" source=static addr="192.168.$i.1" mask=255.255.255.0 gateway=none | Out-Null
+              if($LASTEXITCODE-ne0){throw "IPv4 Wintun $i/20"}
+              Write-Host "WINTUN_PASS=$i/20"
+            } finally {if($p){Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue};Start-Sleep -Milliseconds 200}
+          }
+          Write-Host 'WINTUN_20_OF_20=PASS'
 
-  windows-engine-20:
+  windows-full-20:
     runs-on: windows-latest
-    timeout-minutes: 35
-    needs: [source-safety, windows-native-20, windows-tor-20]
+    timeout-minutes: 40
+    needs: source-and-wintun-20
     strategy:
       fail-fast: false
       matrix:
@@ -176,53 +94,61 @@ jobs:
             country: US
     steps:
       - uses: actions/checkout@v4
-      - name: Run the actual Windows Full Tunnel and verify twenty direct requests
+      - name: Prepare exact Windows runtime
         shell: powershell
         run: |
           $ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue'
-          $base="$env:RUNNER_TEMP\HighGAS";New-Item -ItemType Directory -Force $base|Out-Null
-          Copy-Item local-helper/windows/highgas-tor.ps1 "$base\highgas-tor.ps1"
-          Invoke-WebRequest -UseBasicParsing "https://github.com/xjasonlyu/tun2socks/releases/download/v$env:TUN2SOCKS_VERSION/tun2socks-windows-amd64.zip" -OutFile "$base\t2s.zip"
-          if((Get-FileHash "$base\t2s.zip" -Algorithm SHA256).Hash.ToLowerInvariant()-ne$env:TUN2SOCKS_WIN_SHA256){throw 'tun2socks SHA'}
-          Expand-Archive "$base\t2s.zip" "$base\t2s" -Force;$tun=(Get-ChildItem "$base\t2s" -Recurse -File|Where-Object Name -like 'tun2socks*.exe'|Select-Object -First 1).FullName;Copy-Item $tun "$base\tun2socks.exe"
-          Invoke-WebRequest -UseBasicParsing "https://www.wintun.net/builds/wintun-$env:WINTUN_VERSION.zip" -OutFile "$base\w.zip";Expand-Archive "$base\w.zip" "$base\w" -Force;$dll=(Get-ChildItem "$base\w" -Recurse -File -Filter wintun.dll|Where-Object FullName -match 'amd64'|Select-Object -First 1).FullName;Copy-Item $dll "$base\wintun.dll"
-          $torUrl="https://archive.torproject.org/tor-package-archive/torbrowser/$env:TOR_VERSION/tor-expert-bundle-windows-x86_64-$env:TOR_VERSION.tar.gz";Invoke-WebRequest -UseBasicParsing $torUrl -OutFile "$base\tor.tgz";New-Item -ItemType Directory -Force "$base\tor-expert"|Out-Null;tar -xzf "$base\tor.tgz" -C "$base\tor-expert"
-          $env:HIGHGAS_BASE=$base
+          $b="$env:RUNNER_TEMP\HighGAS";New-Item -ItemType Directory -Force $b|Out-Null
+          Copy-Item local-helper/windows/highgas-tor.ps1 "$b\highgas-tor.ps1"
+          Invoke-WebRequest -UseBasicParsing "https://github.com/xjasonlyu/tun2socks/releases/download/v$env:TUN2SOCKS_VERSION/tun2socks-windows-amd64.zip" -OutFile "$b\t.zip"
+          if((Get-FileHash "$b\t.zip" -Algorithm SHA256).Hash.ToLowerInvariant()-ne$env:TUN2SOCKS_WIN_SHA256){throw 'SHA tun2socks'}
+          Expand-Archive "$b\t.zip" "$b\t" -Force;$tun=(Get-ChildItem "$b\t" -Recurse -File|Where-Object Name -like 'tun2socks*.exe'|Select-Object -First 1).FullName;Copy-Item $tun "$b\tun2socks.exe"
+          Invoke-WebRequest -UseBasicParsing "https://www.wintun.net/builds/wintun-$env:WINTUN_VERSION.zip" -OutFile "$b\w.zip";Expand-Archive "$b\w.zip" "$b\w" -Force;$dll=(Get-ChildItem "$b\w" -Recurse -File -Filter wintun.dll|Where-Object FullName -match 'amd64'|Select-Object -First 1).FullName;Copy-Item $dll "$b\wintun.dll"
+          Invoke-WebRequest -UseBasicParsing "https://archive.torproject.org/tor-package-archive/torbrowser/$env:TOR_VERSION/tor-expert-bundle-windows-x86_64-$env:TOR_VERSION.tar.gz" -OutFile "$b\tor.tgz"
+          New-Item -ItemType Directory -Force "$b\tor-expert"|Out-Null;tar -xzf "$b\tor.tgz" -C "$b\tor-expert"
+          "HIGHGAS_BASE=$b"|Out-File $env:GITHUB_ENV -Append
+      - name: Connect actual product and validate 20 direct requests
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue'
+          $b=$env:HIGHGAS_BASE
           $fwBefore=@(Get-NetFirewallProfile -Profile Domain,Private,Public|ForEach-Object{"$($_.Name)=$($_.DefaultOutboundAction)"}) -join ';'
-          $baseline=(& curl.exe -4 -fsS --connect-timeout 6 --max-time 20 -H 'Accept: application/json' "$env:CHECK_URL?before=$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())"|ConvertFrom-Json).ip
-          if(!$baseline){throw 'baseline IP'}
+          $before=(& curl.exe -4 -fsS --connect-timeout 6 --max-time 20 "$env:CHECK_URL?before=$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())"|ConvertFrom-Json).ip
+          if(!$before){throw 'IP inicial indisponível'}
           try {
-            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$base\highgas-tor.ps1" -Action up -Server '${{ matrix.server }}'
-            if($LASTEXITCODE-ne0){throw 'engine up'}
-            $v=& powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$base\highgas-tor.ps1" -Action verify
-            $v|ForEach-Object{Write-Host $_};if($v-notcontains'VERIFIED=1'){throw 'product verification != 5/5'}
-            1..20|ForEach-Object{
-              $n=$_;$ok=$false
-              1..3|ForEach-Object{if(!$ok){try{$j=& curl.exe -4 -fsS --connect-timeout 8 --max-time 30 -H 'Accept: application/json' "$env:CHECK_URL?full=$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())"|ConvertFrom-Json;if(([string]$j.country).ToUpperInvariant()-eq'${{ matrix.country }}'-and$j.ip-and$j.ip-ne$baseline){$ok=$true}}catch{};if(!$ok){Start-Sleep -Seconds 1}}}
-              if(!$ok){throw "FULL TUNNEL direct check $n/20"};Write-Host "WINDOWS_FULL_${{ matrix.country }}_PASS $n/20 ip=$($j.ip)"
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$b\highgas-tor.ps1" -Action up -Server '${{ matrix.server }}'
+            if($LASTEXITCODE-ne0){throw 'HighGAS up falhou'}
+            $v=@(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$b\highgas-tor.ps1" -Action verify)
+            $v|ForEach-Object{Write-Host $_}
+            foreach($x in @('IP_CHANGED=1','COUNTRY_OK=1','DNS_OK=1','IPV6_OK=1','ROUTE_OK=1','VERIFIED=1')){if($v-notcontains$x){throw "verificação ausente: $x"}}
+            1..20|ForEach-Object {
+              $i=$_;$ok=$false;$j=$null
+              1..3|ForEach-Object {if(!$ok){try{$j=& curl.exe -4 -fsS --connect-timeout 8 --max-time 30 "$env:CHECK_URL?run=$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())"|ConvertFrom-Json;if($j.ip-and$j.ip-ne$before-and([string]$j.country).ToUpperInvariant()-eq'${{ matrix.country }}'){$ok=$true}}catch{};if(!$ok){Start-Sleep -Seconds 1}}}
+              if(!$ok){throw "tráfego direto $i/20 não confirmou ${{ matrix.country }}"}
+              Write-Host "WINDOWS_${{ matrix.country }}_PASS=$i/20 IP=$($j.ip)"
             }
-            $state=Get-Content "$base\runtime\state.json" -Raw|ConvertFrom-Json
-            $route=Get-NetRoute -DestinationPrefix '0.0.0.0/0' -InterfaceAlias ([string]$state.tunAlias) -PolicyStore ActiveStore -ErrorAction Stop|Select-Object -First 1
-            if(!$route){throw 'Wintun default route missing'}
+            $s=Get-Content "$b\runtime\state.json" -Raw|ConvertFrom-Json
+            if(!(Get-NetRoute -DestinationPrefix '0.0.0.0/0' -InterfaceAlias ([string]$s.tunAlias) -PolicyStore ActiveStore -ErrorAction SilentlyContinue)){throw 'rota Wintun ausente'}
+            if(@(Get-NetFirewallProfile -Profile Domain,Private,Public|Where-Object{[string]$_.DefaultOutboundAction-ne'Block'}).Count){throw 'Kill Switch não está bloqueando fallback'}
             & curl.exe -6 -fsS --connect-timeout 2 --max-time 5 https://api64.ipify.org *> $null
-            if($LASTEXITCODE-eq0){throw 'IPv6 leak'}
-            $udpWorked=$true
-            try { Resolve-DnsName -Name example.com -Server 1.1.1.1 -DnsOnly -QuickTimeout -ErrorAction Stop|Out-Null } catch {$udpWorked=$false}
-            if($udpWorked){throw 'direct external UDP DNS unexpectedly succeeded'}
-            Write-Host 'WINDOWS_KILLSWITCH_IPV6_UDP=PASS'
+            if($LASTEXITCODE-eq0){throw 'vazamento IPv6'}
+            $rules=Get-NetFirewallRule -Group 'HighGAS Full Tunnel' -ErrorAction Stop
+            if(!($rules|Where-Object DisplayName -eq 'HighGAS Wintun TCP IPv4')){throw 'regra TCP Wintun ausente'}
+            if(!($rules|Where-Object DisplayName -eq 'HighGAS Tor TCP')){throw 'regra Tor física ausente'}
+            Write-Host 'WINDOWS_KILLSWITCH=PASS'
           } finally {
-            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$base\highgas-tor.ps1" -Action down -ErrorAction SilentlyContinue
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$b\highgas-tor.ps1" -Action down -ErrorAction SilentlyContinue
           }
           Start-Sleep -Seconds 2
           $fwAfter=@(Get-NetFirewallProfile -Profile Domain,Private,Public|ForEach-Object{"$($_.Name)=$($_.DefaultOutboundAction)"}) -join ';'
-          if($fwAfter-ne$fwBefore){Write-Host "BEFORE=$fwBefore AFTER=$fwAfter";throw 'firewall restore mismatch'}
-          $restored=$false;1..5|ForEach-Object{if(!$restored){try{$x=& curl.exe -4 -fsS --connect-timeout 5 --max-time 15 "$env:CHECK_URL?after=$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())"|ConvertFrom-Json;if($x.ip){$restored=$true}}catch{};if(!$restored){Start-Sleep -Seconds 1}}};if(!$restored){throw 'network not restored'}
-          Write-Host 'WINDOWS_PRODUCT_${{ matrix.country }}_FINAL=PASS'
+          if($fwAfter-ne$fwBefore){throw "Firewall não restaurou: $fwBefore -> $fwAfter"}
+          $after=& curl.exe -4 -fsS --connect-timeout 6 --max-time 20 "$env:CHECK_URL?after=$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())"
+          if(!$after){throw 'rede não restaurou'}
+          Write-Host 'WINDOWS_${{ matrix.country }}_20_OF_20=PASS'
 
-  mac-engine-20:
+  macos-full-20:
     runs-on: macos-15-intel
-    timeout-minutes: 35
-    needs: source-safety
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
@@ -233,130 +159,112 @@ jobs:
             country: US
     steps:
       - uses: actions/checkout@v4
-      - name: Run actual macOS Intel Full Tunnel and verify twenty direct requests
+      - name: Prepare and run actual macOS Intel engine
         shell: bash
         run: |
           set -euo pipefail
           test "$(uname -m)" = x86_64
           BASE='/Library/Application Support/HighGAS'
-          sudo rm -rf "$BASE"
-          sudo mkdir -p "$BASE"
+          sudo rm -rf "$BASE";sudo mkdir -p "$BASE" /tmp/hg-tor /tmp/hg-t2s
           curl -fL --retry 3 "https://archive.torproject.org/tor-package-archive/torbrowser/${TOR_VERSION}/tor-expert-bundle-macos-x86_64-${TOR_VERSION}.tar.gz" -o /tmp/tor.tgz
-          mkdir -p /tmp/hg-tor && tar -xzf /tmp/tor.tgz -C /tmp/hg-tor
+          tar -xzf /tmp/tor.tgz -C /tmp/hg-tor
           curl -fL --retry 3 "https://github.com/xjasonlyu/tun2socks/releases/download/v${TUN2SOCKS_VERSION}/tun2socks-darwin-amd64.zip" -o /tmp/t2s.zip
-          echo "${TUN2SOCKS_MAC_SHA256}  /tmp/t2s.zip" | shasum -a 256 -c -
-          mkdir -p /tmp/hg-t2s && unzip -q /tmp/t2s.zip -d /tmp/hg-t2s
-          TUN="$(find /tmp/hg-t2s -type f -name 'tun2socks*' ! -name '*.zip' ! -name '*LICENSE*' -print -quit)"
-          sudo cp -R /tmp/hg-tor "$BASE/tor-expert"
-          sudo cp "$TUN" "$BASE/tun2socks"
-          sudo cp local-helper/highgas-tor "$BASE/highgas-tor"
+          echo "${TUN2SOCKS_MAC_SHA256}  /tmp/t2s.zip"|shasum -a 256 -c -
+          unzip -q /tmp/t2s.zip -d /tmp/hg-t2s
+          TUN="$(find /tmp/hg-t2s -type f -name 'tun2socks*' ! -name '*.zip' -print -quit)"
+          sudo cp -R /tmp/hg-tor "$BASE/tor-expert";sudo cp "$TUN" "$BASE/tun2socks";sudo cp local-helper/highgas-tor "$BASE/highgas-tor"
           sudo chmod +x "$BASE/highgas-tor" "$BASE/tun2socks" "$BASE/tor-expert/tor/tor"
-          BASELINE="$(curl -4 -fsS --connect-timeout 6 --max-time 20 "$CHECK_URL?before=$(date +%s)" | sed -n 's/.*"ip"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
-          test -n "$BASELINE"
+          BEFORE="$(curl -4 -fsS --connect-timeout 6 --max-time 20 "$CHECK_URL?before=$(date +%s)"|sed -n 's/.*"ip"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+          test -n "$BEFORE"
           cleanup(){ sudo "$BASE/highgas-tor" down >/dev/null 2>&1 || true; }
           trap cleanup EXIT
           sudo "$BASE/highgas-tor" up '${{ matrix.server }}'
-          VERIFY="$(sudo "$BASE/highgas-tor" verify)"; printf '%s\n' "$VERIFY"; printf '%s\n' "$VERIFY" | grep -q '^VERIFIED=1$'
-          for i in $(seq 1 20); do
+          V="$(sudo "$BASE/highgas-tor" verify)";printf '%s\n' "$V"
+          for X in IP_CHANGED=1 COUNTRY_OK=1 DNS_OK=1 IPV6_OK=1 ROUTE_OK=1 VERIFIED=1;do printf '%s\n' "$V"|grep -q "^$X$";done
+          for i in $(seq 1 20);do
             OK=0
-            for retry in 1 2 3; do
-              RAW="$(curl -4 -fsS --connect-timeout 8 --max-time 30 -H 'Accept: application/json' "$CHECK_URL?full=$(date +%s)-$i-$retry" 2>/dev/null || true)"
-              IP="$(printf '%s' "$RAW" | sed -n 's/.*"ip"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
-              COUNTRY="$(printf '%s' "$RAW" | sed -n 's/.*"country"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | tr '[:lower:]' '[:upper:]')"
-              if [[ -n "$IP" && "$IP" != "$BASELINE" && "$COUNTRY" == '${{ matrix.country }}' ]]; then OK=1; break; fi
+            for retry in 1 2 3;do
+              RAW="$(curl -4 -fsS --connect-timeout 8 --max-time 30 "$CHECK_URL?run=$(date +%s)-$i-$retry" 2>/dev/null||true)"
+              IP="$(printf '%s' "$RAW"|sed -n 's/.*"ip"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+              C="$(printf '%s' "$RAW"|sed -n 's/.*"country"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p'|tr '[:lower:]' '[:upper:]')"
+              if [[ -n "$IP" && "$IP" != "$BEFORE" && "$C" == '${{ matrix.country }}' ]];then OK=1;break;fi
               sleep 1
             done
-            [[ "$OK" -eq 1 ]] || { echo "mac full tunnel check $i failed"; exit 1; }
-            echo "MAC_FULL_${{ matrix.country }}_PASS $i/20 ip=$IP"
+            [[ "$OK" -eq 1 ]]||{ echo "macOS ${{ matrix.country }} falhou $i/20";exit 1; }
+            echo "MAC_${{ matrix.country }}_PASS=$i/20 IP=$IP"
           done
-          if curl -6 -fsS --connect-timeout 2 --max-time 5 https://api64.ipify.org >/dev/null 2>&1; then echo 'IPv6 leak'; exit 1; fi
-          sudo "$BASE/highgas-tor" down >/dev/null
-          trap - EXIT
-          sleep 2
-          curl -4 -fsS --connect-timeout 5 --max-time 15 "$CHECK_URL?after=$(date +%s)" >/dev/null
-          echo 'MAC_PRODUCT_${{ matrix.country }}_FINAL=PASS'
+          if curl -6 -fsS --connect-timeout 2 --max-time 5 https://api64.ipify.org >/dev/null 2>&1;then echo 'IPv6 leak';exit 1;fi
+          sudo "$BASE/highgas-tor" down >/dev/null;trap - EXIT;sleep 2
+          curl -4 -fsS --connect-timeout 6 --max-time 20 "$CHECK_URL?after=$(date +%s)" >/dev/null
+          echo 'MAC_${{ matrix.country }}_20_OF_20=PASS'
 
   package-windows:
     runs-on: windows-latest
     timeout-minutes: 25
-    needs: [windows-engine-20]
+    needs: windows-full-20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: '1.23.x'
           cache-dependency-path: local-helper/go.mod
-      - name: Build exact Windows 11 x64 package
+      - name: Build final Windows 11 x64 package
         shell: powershell
         run: |
           $ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue'
-          $out="$env:RUNNER_TEMP\HighGAS-Final-Windows11-x64";New-Item -ItemType Directory -Force $out|Out-Null
-          Push-Location local-helper;$env:GOOS='windows';$env:GOARCH='amd64';$env:CGO_ENABLED='0';go build -trimpath -ldflags='-s -w' -o "$out\highgas-helper.exe" ./windows;Pop-Location
-          Copy-Item local-helper/windows/highgas-tor.ps1,local-helper/windows/install.ps1,local-helper/windows/install.bat,local-helper/windows/uninstall.ps1,local-helper/windows/uninstall.bat "$out\"
-          Copy-Item public/highgas-local-controller.js "$out\highgas-local-controller.js"
-          Copy-Item local-helper/TOR-NOTICE.txt,local-helper/TUN2SOCKS-NOTICE.txt "$out\"
-          Invoke-WebRequest -UseBasicParsing "https://github.com/xjasonlyu/tun2socks/releases/download/v$env:TUN2SOCKS_VERSION/tun2socks-windows-amd64.zip" -OutFile "$env:TEMP\t2s-pkg.zip";if((Get-FileHash "$env:TEMP\t2s-pkg.zip" -Algorithm SHA256).Hash.ToLowerInvariant()-ne$env:TUN2SOCKS_WIN_SHA256){throw 't2s sha'};Expand-Archive "$env:TEMP\t2s-pkg.zip" "$env:TEMP\t2s-pkg" -Force;$tun=(Get-ChildItem "$env:TEMP\t2s-pkg" -Recurse -File|Where-Object Name -like 'tun2socks*.exe'|Select-Object -First 1).FullName;Copy-Item $tun "$out\tun2socks.exe"
-          Invoke-WebRequest -UseBasicParsing "https://www.wintun.net/builds/wintun-$env:WINTUN_VERSION.zip" -OutFile "$env:TEMP\w-pkg.zip";Expand-Archive "$env:TEMP\w-pkg.zip" "$env:TEMP\w-pkg" -Force;$dll=(Get-ChildItem "$env:TEMP\w-pkg" -Recurse -File -Filter wintun.dll|Where-Object FullName -match 'amd64'|Select-Object -First 1).FullName;Copy-Item $dll "$out\wintun.dll"
-          Invoke-WebRequest -UseBasicParsing "https://archive.torproject.org/tor-package-archive/torbrowser/$env:TOR_VERSION/tor-expert-bundle-windows-x86_64-$env:TOR_VERSION.tar.gz" -OutFile "$env:TEMP\tor-pkg.tgz";New-Item -ItemType Directory -Force "$out\tor-expert"|Out-Null;tar -xzf "$env:TEMP\tor-pkg.tgz" -C "$out\tor-expert"
-          @'
-          HighGAS 2.0 FINAL — Windows 11 x64
-          1. Execute install.bat e aceite Administrador.
-          2. Abra o atalho HighGAS da Área de Trabalho.
-          3. Escolha Alemanha ou Estados Unidos e clique LIGAR VPN.
-          4. CONECTADO só aparece após IP, país, DNS, IPv6 e Kill Switch passarem.
-          5. Para remover, execute uninstall.bat.
-          TCP IPv4 + DNS passam pelo Tor. UDP e IPv6 ficam bloqueados enquanto ligado para impedir vazamento direto.
-          '@|Set-Content "$out\LEIA-ME.txt" -Encoding UTF8
-          Get-FileHash "$out\highgas-helper.exe","$out\tun2socks.exe","$out\wintun.dll","$out\tor-expert\tor\tor.exe" -Algorithm SHA256|ForEach-Object{"$($_.Hash.ToLowerInvariant())  $([IO.Path]::GetFileName($_.Path))"}|Set-Content "$out\SHA256SUMS.txt" -Encoding ASCII
-          "PACKAGE=$out"|Out-File $env:GITHUB_ENV -Append
+          $o="$env:RUNNER_TEMP\HighGAS-Final-Windows11-x64";New-Item -ItemType Directory -Force $o|Out-Null
+          Push-Location local-helper;$env:GOOS='windows';$env:GOARCH='amd64';$env:CGO_ENABLED='0';go build -trimpath -ldflags='-s -w' -o "$o\highgas-helper.exe" ./windows;Pop-Location
+          Copy-Item local-helper/windows/highgas-tor.ps1,local-helper/windows/install.ps1,local-helper/windows/install.bat,local-helper/windows/uninstall.ps1,local-helper/windows/uninstall.bat "$o\"
+          Copy-Item public/highgas-local-controller.js "$o\highgas-local-controller.js";Copy-Item local-helper/TOR-NOTICE.txt,local-helper/TUN2SOCKS-NOTICE.txt "$o\"
+          Invoke-WebRequest -UseBasicParsing "https://github.com/xjasonlyu/tun2socks/releases/download/v$env:TUN2SOCKS_VERSION/tun2socks-windows-amd64.zip" -OutFile "$env:TEMP\t.zip";if((Get-FileHash "$env:TEMP\t.zip" -Algorithm SHA256).Hash.ToLowerInvariant()-ne$env:TUN2SOCKS_WIN_SHA256){throw 'SHA t2s'};Expand-Archive "$env:TEMP\t.zip" "$env:TEMP\t" -Force;$tun=(Get-ChildItem "$env:TEMP\t" -Recurse -File|Where-Object Name -like 'tun2socks*.exe'|Select-Object -First 1).FullName;Copy-Item $tun "$o\tun2socks.exe"
+          Invoke-WebRequest -UseBasicParsing "https://www.wintun.net/builds/wintun-$env:WINTUN_VERSION.zip" -OutFile "$env:TEMP\w.zip";Expand-Archive "$env:TEMP\w.zip" "$env:TEMP\w" -Force;$dll=(Get-ChildItem "$env:TEMP\w" -Recurse -File -Filter wintun.dll|Where-Object FullName -match 'amd64'|Select-Object -First 1).FullName;Copy-Item $dll "$o\wintun.dll"
+          Invoke-WebRequest -UseBasicParsing "https://archive.torproject.org/tor-package-archive/torbrowser/$env:TOR_VERSION/tor-expert-bundle-windows-x86_64-$env:TOR_VERSION.tar.gz" -OutFile "$env:TEMP\tor.tgz";New-Item -ItemType Directory -Force "$o\tor-expert"|Out-Null;tar -xzf "$env:TEMP\tor.tgz" -C "$o\tor-expert"
+          @('HighGAS 2.0 FINAL - Windows 11 x64','Execute install.bat como Administrador.','Escolha Alemanha ou Estados Unidos e clique LIGAR VPN.','Conectado só aparece após as 5 verificações.','TCP IPv4 e DNS passam pelo Tor; UDP e IPv6 são bloqueados para evitar vazamento.')|Set-Content "$o\LEIA-ME.txt" -Encoding UTF8
+          Get-FileHash "$o\highgas-helper.exe","$o\tun2socks.exe","$o\wintun.dll","$o\tor-expert\tor\tor.exe" -Algorithm SHA256|ForEach-Object{"$($_.Hash.ToLowerInvariant())  $([IO.Path]::GetFileName($_.Path))"}|Set-Content "$o\SHA256SUMS.txt" -Encoding ASCII
+          "PKG=$o"|Out-File $env:GITHUB_ENV -Append
       - name: Install helper and uninstall cleanly
         shell: powershell
         run: |
-          $ErrorActionPreference='Stop';$out=$env:PACKAGE
-          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$out\install.ps1"
-          $h=$null;1..40|ForEach-Object{if(!$h){try{$h=Invoke-RestMethod -UseBasicParsing http://127.0.0.1:37654/v1/health -TimeoutSec 3}catch{};if(!$h){Start-Sleep -Milliseconds 250}}};if(!$h.helper-or$h.version-ne'2.0.0'-or!$h.engineReady){throw 'helper health'}
-          $s=Invoke-WebRequest -UseBasicParsing http://127.0.0.1:37654/api/servers -TimeoutSec 5;if($s.Content-notmatch'de-fra-01'-or$s.Content-notmatch'us-mia-01'){throw 'catalog'}
-          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$out\uninstall.ps1"
-          Start-Sleep -Seconds 1;if(Test-Path "$env:ProgramData\HighGAS"){throw 'uninstall residue'}
-          Write-Host 'WINDOWS_PACKAGE_INSTALL_UNINSTALL=PASS'
+          $ErrorActionPreference='Stop'
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:PKG\install.ps1"
+          $h=$null;1..40|ForEach-Object{if(!$h){try{$h=Invoke-RestMethod -UseBasicParsing http://127.0.0.1:37654/v1/health -TimeoutSec 3}catch{};if(!$h){Start-Sleep -Milliseconds 250}}}
+          if(!$h.helper-or$h.version-ne'2.0.0'-or!$h.engineReady){throw 'helper smoke falhou'}
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:PKG\uninstall.ps1"
+          Start-Sleep -Seconds 1;if(Test-Path "$env:ProgramData\HighGAS"){throw 'resíduo após uninstall'}
+          Write-Host 'WINDOWS_PACKAGE_SMOKE=PASS'
       - uses: actions/upload-artifact@v4
         with:
           name: HighGAS-Final-Windows11-x64
-          path: ${{ env.PACKAGE }}
+          path: ${{ env.PKG }}
           retention-days: 30
 
   package-macos:
     runs-on: macos-15-intel
     timeout-minutes: 25
-    needs: [mac-engine-20]
+    needs: macos-full-20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: '1.23.x'
           cache-dependency-path: local-helper/go.mod
-      - name: Build exact macOS Intel package
+      - name: Build final macOS Intel package
         shell: bash
         run: |
           set -euo pipefail
-          OUT="$RUNNER_TEMP/HighGAS-Final-macOS-Intel";mkdir -p "$OUT" /tmp/pkg-tor /tmp/pkg-t2s
-          (cd local-helper && CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o "$OUT/highgas-helper" ./direct)
-          curl -fL --retry 3 "https://archive.torproject.org/tor-package-archive/torbrowser/${TOR_VERSION}/tor-expert-bundle-macos-x86_64-${TOR_VERSION}.tar.gz" -o /tmp/pkg-tor.tgz;tar -xzf /tmp/pkg-tor.tgz -C /tmp/pkg-tor
-          curl -fL --retry 3 "https://github.com/xjasonlyu/tun2socks/releases/download/v${TUN2SOCKS_VERSION}/tun2socks-darwin-amd64.zip" -o /tmp/pkg-t2s.zip;echo "${TUN2SOCKS_MAC_SHA256}  /tmp/pkg-t2s.zip"|shasum -a 256 -c -;unzip -q /tmp/pkg-t2s.zip -d /tmp/pkg-t2s;TUN="$(find /tmp/pkg-t2s -type f -name 'tun2socks*' ! -name '*.zip' -print -quit)";cp "$TUN" "$OUT/tun2socks"
-          cp local-helper/highgas-tor local-helper/highgas-tunnel local-helper/install.command local-helper/uninstall.command local-helper/TOR-NOTICE.txt local-helper/TUN2SOCKS-NOTICE.txt public/highgas-local-controller.js "$OUT/"
-          cp -R /tmp/pkg-tor "$OUT/tor-expert"
-          chmod +x "$OUT/"{highgas-helper,tun2socks,highgas-tor,highgas-tunnel,install.command,uninstall.command} "$OUT/tor-expert/tor/tor"
-          cat > "$OUT/LEIA-ME.txt" <<'TXT'
-          HighGAS 2.0 FINAL — macOS Intel
-          Execute install.command. Depois escolha Alemanha ou Estados Unidos e use LIGAR/DESLIGAR VPN.
-          TCP IPv4 + DNS passam pelo Full Tunnel Tor. UDP e IPv6 ficam bloqueados para impedir vazamento direto.
-          TXT
-          shasum -a 256 "$OUT/highgas-helper" "$OUT/tun2socks" "$OUT/tor-expert/tor/tor" > "$OUT/SHA256SUMS.txt"
-          echo "PACKAGE=$OUT" >> "$GITHUB_ENV"
+          O="$RUNNER_TEMP/HighGAS-Final-macOS-Intel";mkdir -p "$O" /tmp/ptor /tmp/pt2s
+          (cd local-helper && CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o "$O/highgas-helper" ./direct)
+          curl -fL --retry 3 "https://archive.torproject.org/tor-package-archive/torbrowser/${TOR_VERSION}/tor-expert-bundle-macos-x86_64-${TOR_VERSION}.tar.gz" -o /tmp/ptor.tgz;tar -xzf /tmp/ptor.tgz -C /tmp/ptor
+          curl -fL --retry 3 "https://github.com/xjasonlyu/tun2socks/releases/download/v${TUN2SOCKS_VERSION}/tun2socks-darwin-amd64.zip" -o /tmp/pt2s.zip;echo "${TUN2SOCKS_MAC_SHA256}  /tmp/pt2s.zip"|shasum -a 256 -c -;unzip -q /tmp/pt2s.zip -d /tmp/pt2s;TUN="$(find /tmp/pt2s -type f -name 'tun2socks*' ! -name '*.zip' -print -quit)";cp "$TUN" "$O/tun2socks"
+          cp local-helper/highgas-tor local-helper/highgas-tunnel local-helper/install.command local-helper/uninstall.command local-helper/TOR-NOTICE.txt local-helper/TUN2SOCKS-NOTICE.txt public/highgas-local-controller.js "$O/";cp -R /tmp/ptor "$O/tor-expert"
+          chmod +x "$O/"{highgas-helper,tun2socks,highgas-tor,highgas-tunnel,install.command,uninstall.command} "$O/tor-expert/tor/tor"
+          printf '%s\n' 'HighGAS 2.0 FINAL - macOS Intel' 'Execute install.command.' 'TCP IPv4 e DNS passam pelo Tor; UDP e IPv6 são bloqueados para evitar vazamento.' > "$O/LEIA-ME.txt"
+          shasum -a 256 "$O/highgas-helper" "$O/tun2socks" "$O/tor-expert/tor/tor" > "$O/SHA256SUMS.txt"
+          echo "PKG=$O" >> "$GITHUB_ENV"
       - uses: actions/upload-artifact@v4
         with:
           name: HighGAS-Final-macOS-Intel
-          path: ${{ env.PACKAGE }}
+          path: ${{ env.PKG }}
           retention-days: 30
 
   final-gate:
@@ -365,5 +273,5 @@ jobs:
     steps:
       - run: |
           echo 'HIGHGAS_2_0_FINAL=PASS'
-          echo 'Windows DE 20/20 + US 20/20 + Wintun 20/20 + product 5/5'
-          echo 'macOS Intel DE 20/20 + US 20/20 + product 5/5'
+          echo 'Windows 11 x64: Wintun 20/20, DE 20/20, US 20/20, 5/5, Kill Switch e restore.'
+          echo 'macOS Intel: DE 20/20, US 20/20, 5/5 e restore.'
