@@ -119,13 +119,13 @@ function Get-PhysicalNetwork {
 }
 
 function Public-Info([int]$Timeout=18) {
-  $raw = & curl.exe -4 -fsS --connect-timeout 6 --max-time $Timeout -H 'Accept: application/json' "$CheckUrl?ts=$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())" 2>$null
+  $raw = & curl.exe -4 -fsS --connect-timeout 6 --max-time $Timeout -H 'Accept: application/json' "${CheckUrl}?ts=$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())" 2>$null
   if ($LASTEXITCODE -ne 0 -or !$raw) { return $null }
   try { return ($raw | ConvertFrom-Json) } catch { return $null }
 }
 
 function Tor-Info([string]$Country) {
-  $raw = & curl.exe -4 -fsS --socks5-hostname "127.0.0.1:$SocksPort" --connect-timeout 8 --max-time 25 -H 'Accept: application/json' "$CheckUrl?tor=$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())" 2>$null
+  $raw = & curl.exe -4 -fsS --socks5-hostname "127.0.0.1:$SocksPort" --connect-timeout 8 --max-time 25 -H 'Accept: application/json' "${CheckUrl}?tor=$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())" 2>$null
   if ($LASTEXITCODE -ne 0 -or !$raw) { return $null }
   try {
     $j = $raw | ConvertFrom-Json
