@@ -164,7 +164,7 @@ pf_enable_and_load() {
   rules="$(/usr/bin/mktemp -t highgas-pf).conf"
   cat > "$rules" <<EOF_PF
 pass out quick on lo0 all
-pass out quick on $dev route-to ($dev $gw) inet proto tcp user $PFUSER keep state
+pass out quick route-to ($dev $gw) inet proto tcp user $PFUSER keep state
 block drop out quick on $dev inet all
 block drop out quick inet6 all
 EOF_PF
