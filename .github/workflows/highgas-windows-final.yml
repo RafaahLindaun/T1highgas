@@ -11,6 +11,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: highgas-windows-final-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   TOR_EXPERT_VERSION: '15.0.21'
   TOR_WINDOWS_SHA256: 'f22b8b17cb18c9fa775dfcf68acf6a2fe788336535fe94645204ca85158aa490'
@@ -56,7 +60,7 @@ jobs:
           }
 
           $controller = Get-Content -Raw windows/highgas-tor.ps1
-          foreach ($required in @('strict_route','process_name','tor.exe','ip_version','reject','tor-socks','Test-IPv6Blocked')) {
+          foreach ($required in @('strict_route','process_name','tor.exe','ip_version','reject','tor-socks','Test-IPv6Blocked','connect-stage.log','ci-runner-bypass.flag')) {
             if ($controller -notmatch [regex]::Escape($required)) { throw "controller invariant missing: $required" }
           }
           if ($controller -match 'function Start-Tracked\([^\r\n]*\$Args') { throw 'reserved Args regression' }
@@ -149,6 +153,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $base = Join-Path $env:ProgramData 'HighGAS'
           $runtime = Join-Path $base 'runtime'
+          Set-Content -Path (Join-Path $base 'ci-runner-bypass.flag') -Value 'GitHub Actions only: preserve job control plane while all test traffic remains tunneled.' -Encoding Ascii
           $token = (Get-Content -Raw (Join-Path $base 'helper.token')).Trim()
           $headers = @{ Authorization = "Bearer $token" }
           $report = Join-Path $env:PACKAGE_DIR 'VALIDATION-20X.txt'
@@ -163,14 +168,19 @@ jobs:
 
           function Disconnect-Local {
             try {
-              Invoke-RestMethod -UseBasicParsing -Headers $headers -ContentType 'application/json' -Method Post -Body '{}' -Uri 'https://127.0.0.1:37654/v1/disconnect' -TimeoutSec 60 | Out-Null
+              Invoke-RestMethod -UseBasicParsing -Headers $headers -ContentType 'application/json' -Method Post -Body '{}' -Uri 'https://127.0.0.1:37654/v1/disconnect' -TimeoutSec 45 | Out-Null
             } catch {}
             Start-Sleep -Seconds 1
           }
 
+          function Force-Recover {
+            try { & (Join-Path $base 'highgas-tor.ps1') disconnect *> $null } catch {}
+            Start-Sleep -Seconds 2
+          }
+
           function Connect-Local([string]$server) {
             $body = @{ server = $server } | ConvertTo-Json -Compress
-            $resp = Invoke-WebRequest -UseBasicParsing -SkipHttpErrorCheck -Headers $headers -ContentType 'application/json' -Method Post -Body $body -Uri 'https://127.0.0.1:37654/v1/connect' -TimeoutSec 300
+            $resp = Invoke-WebRequest -UseBasicParsing -SkipHttpErrorCheck -Headers $headers -ContentType 'application/json' -Method Post -Body $body -Uri 'https://127.0.0.1:37654/v1/connect' -TimeoutSec 120
             if ([int]$resp.StatusCode -lt 200 -or [int]$resp.StatusCode -ge 300) {
               throw "connect HTTP $($resp.StatusCode): $($resp.Content)"
             }
@@ -178,11 +188,11 @@ jobs:
           }
 
           function Log-Diagnostics([int]$cycle,[int]$attempt) {
-            foreach ($name in @('tor.log','tor.stderr.log','singbox.stderr.log','singbox.stdout.log')) {
+            foreach ($name in @('connect-stage.log','tor.log','tor.stderr.log','tor.stdout.log','singbox.stderr.log','singbox.stdout.log')) {
               $p = Join-Path $runtime $name
               if (Test-Path $p) {
                 "--- $name cycle=$cycle attempt=$attempt ---" | Tee-Object -FilePath $report -Append | Write-Host
-                Get-Content $p -Tail 50 -ErrorAction SilentlyContinue | Tee-Object -FilePath $report -Append | Write-Host
+                Get-Content $p -Tail 80 -ErrorAction SilentlyContinue | Tee-Object -FilePath $report -Append | Write-Host
               }
             }
           }
@@ -220,7 +230,7 @@ jobs:
               } catch {
                 ('RETRY cycle={0:D2} attempt={1} error={2}' -f $cycle,$attempt,$_.Exception.Message) | Tee-Object -FilePath $report -Append | Write-Host
                 Log-Diagnostics $cycle $attempt
-                Disconnect-Local
+                Force-Recover
                 if ($attempt -lt 5) { Start-Sleep -Seconds 3 }
               }
             }
