@@ -4,6 +4,7 @@ SYSTEM="/Library/Application Support/HighGAS"
 CERTDIR="$SYSTEM/certs"
 TOKEN="$SYSTEM/helper.token"
 PLIST="/Library/LaunchDaemons/app.highgas.helper.plist"
+CI_MODE="${HIGHGAS_CI:-0}"
 sudo -v
 
 # Restaura a rede antes de remover qualquer arquivo, mesmo se o helper não responder.
@@ -36,5 +37,7 @@ fi
 rm -f "$HOME/Library/LaunchAgents/app.highgas.helper.plist" >/dev/null 2>&1 || true
 
 echo "HighGAS removido e configurações de rede restauradas."
-read -k 1 '?Pressione qualquer tecla para fechar.'
-echo
+if [[ "$CI_MODE" != "1" ]]; then
+  read -k 1 '?Pressione qualquer tecla para fechar.'
+  echo
+fi
