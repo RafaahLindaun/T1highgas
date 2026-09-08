@@ -65,7 +65,7 @@ function Get-Target([string]$Code) {
 function Invoke-NetworkInfo([switch]$ThroughTor) {
   $args = @('-fsS','--connect-timeout','12','--max-time','25','-H','Cache-Control: no-cache')
   if ($ThroughTor) { $args += @('--socks5-hostname',"127.0.0.1:$SocksPort") }
-  $args += "$CheckUrl?ts=$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())"
+  $args += "${CheckUrl}?ts=$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())"
   $raw = & curl.exe @args 2>$null
   if ($LASTEXITCODE -ne 0 -or -not $raw) { throw 'network_info_failed' }
   return ($raw | Out-String | ConvertFrom-Json)
