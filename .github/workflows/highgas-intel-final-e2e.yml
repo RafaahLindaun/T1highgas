@@ -1,3 +1,4 @@
+# reliability rerun 1
 name: HighGAS Intel Final E2E
 
 on:
@@ -86,7 +87,15 @@ jobs:
           BASEIP="$(printf '%s' "$BASE"|sed -n 's/.*"ip"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
           test -n "$BASEIP"; ok baseline-ip
 
-          OUT="$(sudo "$HG" up "$SERVER")"
+          set +e
+          OUT="$(sudo "$HG" up "$SERVER" 2>/tmp/intel-up.err)"
+          RC=$?
+          set -e
+          if [ "$RC" -ne 0 ]; then
+            cat /tmp/intel-up.err || true
+            sudo tail -120 "$S/tor-runtime/tor.log" 2>/dev/null || true
+            exit "$RC"
+          fi
           printf '%s\n' "$OUT" | grep -q '^connected tor '; ok connected-result
           printf '%s\n' "$OUT" | grep -q " $SERVER "; ok selected-server
 
