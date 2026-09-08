@@ -34,8 +34,9 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           Push-Location windows
-          gofmt -w main.go
-          if (git diff --exit-code -- main.go) { } else { throw 'windows/main.go is not gofmt-clean' }
+          $fmt = gofmt -d main.go
+          if ($LASTEXITCODE -ne 0) { throw 'gofmt failed' }
+          if ($fmt) { $fmt | Write-Host; throw 'windows/main.go is not gofmt-clean' }
           go vet ./...
           go test ./...
           go build -trimpath -ldflags='-s -w' -o "$env:RUNNER_TEMP\highgas-helper.exe" .
@@ -83,7 +84,8 @@ jobs:
           if (-not $singExe) { throw 'sing-box.exe missing' }
           $singDest = Join-Path $payload 'sing-box'
           New-Item -ItemType Directory -Force -Path $singDest | Out-Null
-          Copy-Item $singExe.FullName (Join-Path $singDest 'sing-box.exe') -Force
+          Copy-Item -Path (Join-Path $singExe.Directory.FullName '*') -Destination $singDest -Recurse -Force
+          if (-not (Test-Path (Join-Path $singDest 'sing-box.exe'))) { throw 'sing-box payload incomplete' }
 
           Copy-Item "$env:RUNNER_TEMP\highgas-helper.exe" (Join-Path $payload 'highgas-helper.exe')
           Copy-Item windows/highgas-tor.ps1 (Join-Path $payload 'highgas-tor.ps1')
@@ -156,10 +158,19 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Continue'
-          & "$env:PACKAGE_DIR\uninstall.ps1"
+          if ($env:PACKAGE_DIR -and (Test-Path "$env:PACKAGE_DIR\uninstall.ps1")) {
+            & "$env:PACKAGE_DIR\uninstall.ps1"
+          } else {
+            $base = Join-Path $env:ProgramData 'HighGAS'
+            if (Test-Path (Join-Path $base 'highgas-tor.ps1')) { & (Join-Path $base 'highgas-tor.ps1') disconnect *> $null }
+            schtasks.exe /End /TN HighGAS-Helper *> $null
+            schtasks.exe /Delete /TN HighGAS-Helper /F *> $null
+            Get-Process highgas-helper,sing-box,tor -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+            Remove-Item -Recurse -Force $base -ErrorAction SilentlyContinue
+          }
           Start-Sleep -Seconds 2
           if (Test-Path (Join-Path $env:ProgramData 'HighGAS')) { throw 'ProgramData residue remains' }
-          $task = schtasks.exe /Query /TN HighGAS-Helper 2>$null
+          $null = schtasks.exe /Query /TN HighGAS-Helper 2>$null
           if ($LASTEXITCODE -eq 0) { throw 'scheduled task residue remains' }
           if (Get-Process highgas-helper,sing-box,tor -ErrorAction SilentlyContinue) { throw 'process residue remains' }
 
