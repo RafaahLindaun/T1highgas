@@ -8,6 +8,7 @@ $ProgressPreference = 'SilentlyContinue'
 $Base = Join-Path $env:ProgramData 'HighGAS'
 $Runtime = Join-Path $Base 'runtime'
 $TorDir = Join-Path $Base 'tor-expert\tor'
+$TorDataDir = Join-Path $Base 'tor-expert\data'
 $TorExe = Join-Path $TorDir 'tor.exe'
 $SingBoxExe = Join-Path $Base 'sing-box\sing-box.exe'
 $Torrc = Join-Path $Runtime 'torrc'
@@ -72,8 +73,8 @@ function Invoke-NetworkInfo([switch]$ThroughTor) {
 
 function Write-TorConfig([hashtable]$Target) {
   $dataDir = (Join-Path $Runtime 'tor-data').Replace('\','/')
-  $geo = (Join-Path $TorDir 'geoip').Replace('\','/')
-  $geo6 = (Join-Path $TorDir 'geoip6').Replace('\','/')
+  $geo = (Join-Path $TorDataDir 'geoip').Replace('\','/')
+  $geo6 = (Join-Path $TorDataDir 'geoip6').Replace('\','/')
   $log = $TorLog.Replace('\','/')
   $text = @"
 ClientOnly 1
@@ -191,6 +192,8 @@ function Connect-HighGAS([string]$Code) {
   Ensure-Runtime
   if (-not (Test-Path $TorExe)) { throw "Tor not found: $TorExe" }
   if (-not (Test-Path $SingBoxExe)) { throw "sing-box not found: $SingBoxExe" }
+  if (-not (Test-Path (Join-Path $TorDataDir 'geoip'))) { throw 'Tor geoip data missing.' }
+  if (-not (Test-Path (Join-Path $TorDataDir 'geoip6'))) { throw 'Tor geoip6 data missing.' }
   $target = Get-Target $Code
   Recover-HighGAS
   $baseline = Invoke-NetworkInfo
@@ -257,6 +260,8 @@ function Self-Test {
   Ensure-Runtime
   if (-not (Test-Path $TorExe)) { throw 'tor_missing' }
   if (-not (Test-Path $SingBoxExe)) { throw 'singbox_missing' }
+  if (-not (Test-Path (Join-Path $TorDataDir 'geoip'))) { throw 'tor_geoip_missing' }
+  if (-not (Test-Path (Join-Path $TorDataDir 'geoip6'))) { throw 'tor_geoip6_missing' }
   Write-SingBoxConfig
   Assert-SingBoxConfig
   $v = & $SingBoxExe version | Out-String
