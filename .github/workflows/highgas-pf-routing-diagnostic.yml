@@ -1,0 +1,106 @@
+name: HighGAS PF Routing Diagnostic
+
+on:
+  push:
+    branches: [highgas-full-tunnel-v1]
+    paths: [".github/workflows/highgas-pf-routing-diagnostic.yml"]
+
+env:
+  TOR_EXPERT_VERSION: "15.0.21"
+  TUN2SOCKS_VERSION: "2.7.0"
+
+jobs:
+  diagnose:
+    runs-on: macos-15-intel
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - name: Diagnose Tor under PF before and after full routes
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fL --retry 3 "https://archive.torproject.org/tor-package-archive/torbrowser/${TOR_EXPERT_VERSION}/tor-expert-bundle-macos-x86_64-${TOR_EXPERT_VERSION}.tar.gz" -o /tmp/tor.tgz
+          curl -fL --retry 3 "https://github.com/xjasonlyu/tun2socks/releases/download/v${TUN2SOCKS_VERSION}/tun2socks-darwin-amd64.zip" -o /tmp/t2s.zip
+          rm -rf /tmp/hgdiag && mkdir -p /tmp/hgdiag/tor /tmp/hgdiag/t2s /tmp/hgdiag/data
+          tar -xzf /tmp/tor.tgz -C /tmp/hgdiag/tor
+          unzip -q /tmp/t2s.zip -d /tmp/hgdiag/t2s
+          chmod -R a+rX /tmp/hgdiag/tor
+          TUN="$(find /tmp/hgdiag/t2s -type f -name 'tun2socks*' ! -name '*.zip' ! -name '*LICENSE*' -print -quit)"; chmod +x "$TUN"
+          TOR=/tmp/hgdiag/tor/tor/tor; GEO=/tmp/hgdiag/tor/data/geoip; GEO6=/tmp/hgdiag/tor/data/geoip6
+          sudo chown _www /tmp/hgdiag/data
+          RI="$(route -n get default)"; DEV="$(printf '%s\n' "$RI"|awk '/interface:/{print $2;exit}')"; GW="$(printf '%s\n' "$RI"|awk '/gateway:/{print $2;exit}')"
+          ROUTES=(1.0.0.0/8 2.0.0.0/7 4.0.0.0/6 8.0.0.0/5 16.0.0.0/4 32.0.0.0/3 64.0.0.0/2 128.0.0.0/1)
+          IFACE=""; TP=""; RP=""; PFON=0
+          cleanup(){
+            set +e
+            for r in "${ROUTES[@]}"; do [ -n "$IFACE" ] && sudo route -q -n delete -inet "$r" -interface "$IFACE" >/dev/null 2>&1; done
+            sudo pfctl -a com.apple/highgasdiag -F all >/dev/null 2>&1
+            [ -n "$TP" ] && sudo kill "$TP" >/dev/null 2>&1
+            [ -n "$RP" ] && sudo kill "$RP" >/dev/null 2>&1
+          }
+          trap cleanup EXIT
+
+          sudo "$TOR" --User _www --ClientOnly 1 --RunAsDaemon 1 --AvoidDiskWrites 1 --ClientUseIPv6 0 --SocksPort 127.0.0.1:39050 --DNSPort 127.0.0.1:39053 --DataDirectory /tmp/hgdiag/data --GeoIPFile "$GEO" --GeoIPv6File "$GEO6" --ExitNodes '{de}' --StrictNodes 1 --PidFile /tmp/hgdiag/data/tor.pid --Log 'notice file /tmp/hgdiag/data/tor.log'
+          for i in $(seq 1 150); do sudo grep -q 'Bootstrapped 100%' /tmp/hgdiag/data/tor.log 2>/dev/null && break; sleep 1; done
+          sudo grep -q 'Bootstrapped 100%' /tmp/hgdiag/data/tor.log
+          RP="$(sudo cat /tmp/hgdiag/data/tor.pid)"
+          echo "CHECK1 TOR_BOOTSTRAP_OK"
+          curl -4 -fsS --socks5-hostname 127.0.0.1:39050 --max-time 30 https://lowgas.vercel.app/api/network-info | tee /tmp/pre.json
+          grep -q '"country":"DE"' /tmp/pre.json
+          echo "CHECK2 SOCKS_BEFORE_PF_OK"
+          echo '--- Tor connections before PF ---'
+          sudo lsof -nP -a -p "$RP" -iTCP || true
+
+          NAME=/tmp/hgdiag/tun.name
+          sudo /usr/bin/env WG_TUN_NAME_FILE="$NAME" "$TUN" --device utun --proxy socks5://127.0.0.1:39050 --loglevel debug >/tmp/hgdiag/t2s.log 2>&1 & TP=$!
+          for i in $(seq 1 50); do test -s "$NAME" && break; sudo kill -0 "$TP" 2>/dev/null || { cat /tmp/hgdiag/t2s.log; exit 1; }; sleep .2; done
+          IFACE="$(sudo cat "$NAME"|tr -d '\r\n')"
+          sudo ifconfig "$IFACE" inet 198.18.0.1 198.18.0.1 up
+          echo "CHECK3 TUN_UP $IFACE"
+
+          cat >/tmp/hgdiag/pf.conf <<EOF
+          pass out quick on lo0 all
+          pass out quick on $DEV inet proto tcp user _www keep state
+          pass out quick on $IFACE route-to ($DEV $GW) inet proto tcp user _www keep state
+          block drop out quick on $DEV inet all
+          block drop out quick inet6 all
+          EOF
+          sudo pfctl -nf /tmp/hgdiag/pf.conf
+          sudo pfctl -E >/tmp/hgdiag/pfenable.txt 2>&1 || true
+          sudo pfctl -a com.apple/highgasdiag -f /tmp/hgdiag/pf.conf
+          sudo pfctl -F states
+          echo '--- Loaded PF ---'; sudo pfctl -a com.apple/highgasdiag -sr
+          echo "CHECK4 PF_LOADED"
+
+          set +e
+          curl -4 -fsS --socks5-hostname 127.0.0.1:39050 --connect-timeout 8 --max-time 25 https://lowgas.vercel.app/api/network-info >/tmp/afterpf.json
+          RCPF=$?
+          set -e
+          echo "SOCKS_AFTER_PF_RC=$RCPF"; cat /tmp/afterpf.json || true
+          echo '--- Tor connections after PF ---'; sudo lsof -nP -a -p "$RP" -iTCP || true
+          echo '--- PF states after PF SOCKS ---'; sudo pfctl -ss || true
+          [ "$RCPF" -eq 0 ] || { echo 'FAIL_STAGE=PF_ALONE'; exit 41; }
+          echo "CHECK5 SOCKS_AFTER_PF_OK"
+
+          for r in "${ROUTES[@]}"; do sudo route -q -n add -inet "$r" -interface "$IFACE"; done
+          echo "CHECK6 FULL_ROUTES_ADDED"
+          route -n get 1.1.1.1
+          echo '--- Tor connections after routes ---'; sudo lsof -nP -a -p "$RP" -iTCP || true
+          RELAY="$(sudo lsof -nP -a -p "$RP" -iTCP -sTCP:ESTABLISHED 2>/dev/null | awk 'NR>1{split($9,a,"->"); split(a[2],b,":"); if (b[1] ~ /^[0-9]+\./){print b[1]; exit}}')"
+          if [ -n "$RELAY" ]; then echo "RELAY=$RELAY"; route -n get "$RELAY" || true; fi
+
+          set +e
+          curl -4 -fsS --socks5-hostname 127.0.0.1:39050 --connect-timeout 8 --max-time 25 https://lowgas.vercel.app/api/network-info >/tmp/full.json
+          RCFULL=$?
+          set -e
+          echo "SOCKS_AFTER_FULL_ROUTES_RC=$RCFULL"; cat /tmp/full.json || true
+          echo '--- PF states full ---'; sudo pfctl -ss || true
+          echo '--- Tor log tail ---'; sudo tail -80 /tmp/hgdiag/data/tor.log || true
+          [ "$RCFULL" -eq 0 ] || { echo 'FAIL_STAGE=FULL_ROUTES'; exit 42; }
+          grep -q '"country":"DE"' /tmp/full.json
+          echo "CHECK7 SOCKS_AFTER_FULL_ROUTES_OK"
+
+          dig +time=3 +tries=1 +short @127.0.0.1 -p 39053 lowgas.vercel.app A | grep -Eq '^[0-9]+(\.[0-9]+){3}$'
+          echo "CHECK8 TOR_DNS_AFTER_FULL_ROUTES_OK"
+          trap - EXIT
+          cleanup
