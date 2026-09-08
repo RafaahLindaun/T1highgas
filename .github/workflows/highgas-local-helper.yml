@@ -101,11 +101,18 @@ jobs:
           command -v /usr/sbin/networksetup
           id _www
 
-          cat >/tmp/highgas-pf-test.conf <<'EOF'
+          DEFAULT_ROUTE="$(/sbin/route -n get default)"
+          DEV="$(printf '%s\n' "$DEFAULT_ROUTE" | awk '/interface:/{print $2; exit}')"
+          GW="$(printf '%s\n' "$DEFAULT_ROUTE" | awk '/gateway:/{print $2; exit}')"
+          test -n "$DEV"
+          test -n "$GW"
+          /sbin/ifconfig "$DEV" >/dev/null
+
+          cat >/tmp/highgas-pf-test.conf <<EOF
           pass out quick on lo0 all
-          pass out quick on en0 inet proto tcp user _www keep state
-          pass out quick on utun4 route-to (en0 192.0.2.1) inet proto tcp user _www keep state
-          block drop out quick on en0 inet all
+          pass out quick on $DEV inet proto tcp user _www keep state
+          pass out quick on utun4 route-to ($DEV $GW) inet proto tcp user _www keep state
+          block drop out quick on $DEV inet all
           block drop out quick inet6 all
           EOF
           sudo /sbin/pfctl -nf /tmp/highgas-pf-test.conf
@@ -130,12 +137,12 @@ jobs:
           }
           trap cleanup EXIT
           for i in {1..50}; do
-            test -s "$NAME" && break
+            sudo test -s "$NAME" && break
             sudo kill -0 "$PID" 2>/dev/null || { cat /tmp/t2s.log; exit 1; }
             sleep .2
           done
-          test -s "$NAME"
-          IFACE="$(cat "$NAME" | tr -d '\r\n')"
+          sudo test -s "$NAME"
+          IFACE="$(sudo cat "$NAME" | tr -d '\r\n')"
           [[ "$IFACE" =~ ^utun[0-9]+$ ]]
           /sbin/ifconfig "$IFACE" >/dev/null
           sudo /sbin/ifconfig "$IFACE" inet 198.18.0.1 198.18.0.1 up
