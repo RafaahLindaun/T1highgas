@@ -1,0 +1,64 @@
+name: HighGAS Windows Engine Diagnostic
+on:
+  push:
+    branches: [highgas-windows11-universal-v2]
+    paths: ['.github/workflows/highgas-windows-engine-diagnostic.yml']
+env:
+  TOR_VERSION: '15.0.21'
+  TUN2SOCKS_VERSION: '2.7.0'
+  TUN2SOCKS_WIN_SHA256: 'c5d46e9452f6c9cc7c15ab9158d6d6a0169ceecd6bca019ce476b49337d2be43'
+  WINTUN_VERSION: '0.14.1'
+  CHECK_URL: 'https://lowgas.vercel.app/api/network-info'
+jobs:
+  engine:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - server: de-fra-01
+            country: DE
+          - server: us-mia-01
+            country: US
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare runtime
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue'
+          $b="$env:RUNNER_TEMP\HighGAS";New-Item -ItemType Directory -Force $b|Out-Null
+          Copy-Item local-helper/windows/highgas-tor.ps1 "$b\highgas-tor.ps1"
+          Invoke-WebRequest -UseBasicParsing "https://github.com/xjasonlyu/tun2socks/releases/download/v$env:TUN2SOCKS_VERSION/tun2socks-windows-amd64.zip" -OutFile "$b\t.zip"
+          if((Get-FileHash "$b\t.zip" -Algorithm SHA256).Hash.ToLowerInvariant()-ne$env:TUN2SOCKS_WIN_SHA256){throw 'tun2socks sha'}
+          Expand-Archive "$b\t.zip" "$b\t" -Force;$tun=(Get-ChildItem "$b\t" -Recurse -File|Where-Object Name -like 'tun2socks*.exe'|Select-Object -First 1).FullName;Copy-Item $tun "$b\tun2socks.exe"
+          Invoke-WebRequest -UseBasicParsing "https://www.wintun.net/builds/wintun-$env:WINTUN_VERSION.zip" -OutFile "$b\w.zip";Expand-Archive "$b\w.zip" "$b\w" -Force;$dll=(Get-ChildItem "$b\w" -Recurse -File -Filter wintun.dll|Where-Object FullName -match 'amd64'|Select-Object -First 1).FullName;Copy-Item $dll "$b\wintun.dll"
+          Invoke-WebRequest -UseBasicParsing "https://archive.torproject.org/tor-package-archive/torbrowser/$env:TOR_VERSION/tor-expert-bundle-windows-x86_64-$env:TOR_VERSION.tar.gz" -OutFile "$b\tor.tgz";New-Item -ItemType Directory -Force "$b\tor-expert"|Out-Null;tar -xzf "$b\tor.tgz" -C "$b\tor-expert"
+          "HIGHGAS_BASE=$b"|Out-File $env:GITHUB_ENV -Append
+      - name: Run product
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue';$b=$env:HIGHGAS_BASE
+          $url="$($env:CHECK_URL)?before=$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())"
+          Write-Host "BASELINE_URL=$url"
+          $before=(& curl.exe -4 -fsS --connect-timeout 6 --max-time 20 $url|ConvertFrom-Json).ip
+          if(!$before){throw 'baseline'}
+          try {
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$b\highgas-tor.ps1" -Action up -Server '${{ matrix.server }}'
+            if($LASTEXITCODE-ne0){throw 'up exitcode'}
+            Write-Host '--- STATE ---';Get-Content "$b\runtime\state.json" -ErrorAction SilentlyContinue
+            Write-Host '--- VERIFY ---';$v=@(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$b\highgas-tor.ps1" -Action verify);$v|ForEach-Object{Write-Host $_}
+            if($v-notcontains'VERIFIED=1'){throw 'verify != 1'}
+            $j=& curl.exe -4 -fsS --connect-timeout 8 --max-time 30 "$($env:CHECK_URL)?direct=$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())"|ConvertFrom-Json
+            Write-Host "DIRECT_IP=$($j.ip) COUNTRY=$($j.country) BASE=$before"
+            if(!$j.ip-or$j.ip-eq$before-or([string]$j.country).ToUpperInvariant()-ne'${{ matrix.country }}'){throw 'direct traffic mismatch'}
+            Write-Host 'ENGINE_${{ matrix.country }}=PASS'
+          } catch {
+            Write-Host "ERROR=$($_.Exception.Message)"
+            Write-Host '--- TOR LOG ---';Get-Content "$b\runtime\tor.log" -Tail 80 -ErrorAction SilentlyContinue
+            Write-Host '--- TOR ERROR ---';Get-Content "$b\runtime\tor-error.log" -Tail 80 -ErrorAction SilentlyContinue
+            Write-Host '--- TUN ERROR ---';Get-Content "$b\runtime\tun2socks-error.log" -Tail 80 -ErrorAction SilentlyContinue
+            throw
+          } finally {
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$b\highgas-tor.ps1" -Action down -ErrorAction SilentlyContinue
+          }

@@ -1,0 +1,42 @@
+name: HighGAS Tor Windows Diagnostic
+on:
+  workflow_dispatch:
+  push:
+    branches: [highgas-windows11-universal-v2]
+    paths: ['.github/workflows/highgas-tor-windows-diagnostic.yml']
+env:
+  TOR_VERSION: '15.0.21'
+jobs:
+  diagnose:
+    runs-on: windows-latest
+    timeout-minutes: 12
+    steps:
+      - name: Diagnose Tor command line
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue'
+          $b="$env:RUNNER_TEMP\tor-diag";New-Item -ItemType Directory -Force $b|Out-Null
+          Invoke-WebRequest -UseBasicParsing "https://archive.torproject.org/tor-package-archive/torbrowser/$env:TOR_VERSION/tor-expert-bundle-windows-x86_64-$env:TOR_VERSION.tar.gz" -OutFile "$b\tor.tgz"
+          tar -xzf "$b\tor.tgz" -C $b
+          $tor="$b\tor\tor.exe";$geo="$b\data\geoip";$geo6="$b\data\geoip6"
+          function RunForm([string]$name,[string[]]$argv){
+            $out="$b\$name.out";$err="$b\$name.err"
+            Write-Host "===== $name =====";Write-Host ($argv -join ' | ')
+            $p=Start-Process $tor -ArgumentList $argv -PassThru -WindowStyle Hidden -RedirectStandardOutput $out -RedirectStandardError $err
+            Start-Sleep -Seconds 5
+            Write-Host "EXITED=$($p.HasExited)"
+            if(Test-Path $out){Write-Host 'STDOUT';Get-Content $out -ErrorAction SilentlyContinue}
+            if(Test-Path $err){Write-Host 'STDERR';Get-Content $err -ErrorAction SilentlyContinue}
+            $ok=!$p.HasExited
+            if($ok){Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue}
+            return $ok
+          }
+          New-Item -ItemType Directory -Force "$b\data-array","$b\data-quoted","$b\data-nolog"|Out-Null
+          $a1=@('--SocksPort','127.0.0.1:39500','--DataDirectory',"$b\data-array",'--GeoIPFile',$geo,'--GeoIPv6File',$geo6,'--ExitNodes','{de}','--StrictNodes','1','--ClientUseIPv6','0','--Log','notice stdout')
+          $r1=RunForm 'array-log-space' $a1
+          $a2=@('--SocksPort','127.0.0.1:39501','--DataDirectory',"$b\data-quoted",'--GeoIPFile',$geo,'--GeoIPv6File',$geo6,'--ExitNodes','{de}','--StrictNodes','1','--ClientUseIPv6','0','--Log','"notice stdout"')
+          $r2=RunForm 'quoted-log' $a2
+          $a3=@('--SocksPort','127.0.0.1:39502','--DataDirectory',"$b\data-nolog",'--GeoIPFile',$geo,'--GeoIPv6File',$geo6,'--ExitNodes','{de}','--StrictNodes','1','--ClientUseIPv6','0')
+          $r3=RunForm 'no-log' $a3
+          Write-Host "RESULT r1=$r1 r2=$r2 r3=$r3"
+          if(!($r1-or$r2-or$r3)){throw 'all Tor forms failed'}

@@ -1,0 +1,95 @@
+name: HighGAS Windows Diagnostic V3
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [highgas-windows11-universal-v2]
+    paths:
+      - 'local-helper/windows/highgas-tor-final.ps1'
+      - 'local-helper/windows/install-final.ps1'
+      - '.github/workflows/highgas-windows-diagnostic-v3.yml'
+
+env:
+  TOR_VERSION: '15.0.21'
+  TUN2SOCKS_VERSION: '2.7.0'
+  TUN2SOCKS_SHA256: 'c5d46e9452f6c9cc7c15ab9158d6d6a0169ceecd6bca019ce476b49337d2be43'
+  WINTUN_VERSION: '0.14.1'
+
+jobs:
+  primitives:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run 20+ Windows native primitives
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue';$n=0
+          function Pass([string]$x){$script:n++;Write-Host "NATIVE_PASS $script:n - $x"}
+          if([Environment]::Is64BitOperatingSystem){Pass 'x64'}else{throw 'x64'}
+          foreach($p in @('local-helper/windows/highgas-tor-final.ps1','local-helper/windows/install-final.ps1','local-helper/windows/uninstall.ps1')){$t=$null;$e=$null;[Management.Automation.Language.Parser]::ParseFile((Resolve-Path $p),[ref]$t,[ref]$e)|Out-Null;if($e.Count){$e|Format-List|Out-String|Write-Host;throw "parser $p"};Pass "parser $p"}
+          Get-Command Get-NetRoute -ErrorAction Stop|Out-Null;Pass 'NetTCPIP'
+          Get-Command New-NetFirewallRule -ErrorAction Stop|Out-Null;Pass 'NetSecurity'
+          Get-Command Register-ScheduledTask -ErrorAction Stop|Out-Null;Pass 'ScheduledTasks'
+          Invoke-WebRequest -UseBasicParsing "https://github.com/xjasonlyu/tun2socks/releases/download/v$env:TUN2SOCKS_VERSION/tun2socks-windows-amd64.zip" -OutFile "$env:TEMP\t2s3.zip"
+          if((Get-FileHash "$env:TEMP\t2s3.zip" -Algorithm SHA256).Hash.ToLowerInvariant()-ne$env:TUN2SOCKS_SHA256){throw 't2s hash'};Pass 'tun2socks hash'
+          Expand-Archive "$env:TEMP\t2s3.zip" "$env:TEMP\t2s3" -Force;$tun=(Get-ChildItem "$env:TEMP\t2s3" -Recurse -File|Where-Object Name -like 'tun2socks*.exe'|Select-Object -First 1).FullName;if($tun){Pass 'tun exe'}else{throw 'tun'}
+          Invoke-WebRequest -UseBasicParsing "https://www.wintun.net/builds/wintun-$env:WINTUN_VERSION.zip" -OutFile "$env:TEMP\w3.zip";Expand-Archive "$env:TEMP\w3.zip" "$env:TEMP\w3" -Force;$dll=(Get-ChildItem "$env:TEMP\w3" -Recurse -File -Filter wintun.dll|Where-Object FullName -match'amd64'|Select-Object -First 1).FullName;if($dll){Pass 'wintun dll'}else{throw 'dll'}
+          if((Get-AuthenticodeSignature $dll).Status-eq'Valid'){Pass 'wintun signature'}else{throw 'signature'};Copy-Item $dll (Split-Path $tun) -Force
+          $o="$env:TEMP\tun3.out";$e="$env:TEMP\tun3.err";$p=Start-Process $tun -ArgumentList '--device wintun --proxy socks5://127.0.0.1:9 --loglevel debug' -WorkingDirectory (Split-Path $tun) -PassThru -WindowStyle Hidden -RedirectStandardOutput $o -RedirectStandardError $e
+          try{$a=$null;for($i=0;$i-lt100;$i++){if($p.HasExited){Get-Content $o,$e -ErrorAction SilentlyContinue;throw "tun exited $($p.ExitCode)"};$a=Get-NetAdapter -ErrorAction SilentlyContinue|Where-Object{$_.Name-eq'wintun'-or$_.InterfaceDescription-match'(?i)Wintun'}|Select-Object -First 1;if($a){break};Start-Sleep -Milliseconds 200};if(!$a){Get-Content $o,$e -ErrorAction SilentlyContinue;throw 'adapter missing'};Pass 'Wintun created';netsh interface ipv4 set address name="$($a.Name)" source=static addr=192.168.123.1 mask=255.255.255.0 gateway=none|Out-Null;if($LASTEXITCODE-ne0){throw 'netsh'};Pass 'IPv4 assigned';Set-NetIPInterface -InterfaceAlias $a.Name -AddressFamily IPv4 -InterfaceMetric 1;Pass 'metric';Set-DnsClientServerAddress -InterfaceAlias $a.Name -ServerAddresses 127.0.0.1;Pass 'DNS assigned';if((Get-DnsClientServerAddress -InterfaceAlias $a.Name -AddressFamily IPv4).ServerAddresses-contains'127.0.0.1'){Pass 'DNS readback'}else{throw 'dns'};New-NetRoute -DestinationPrefix 203.0.113.0/24 -InterfaceAlias $a.Name -NextHop 192.168.123.1 -RouteMetric 1 -PolicyStore ActiveStore|Out-Null;Pass 'route added';if(Get-NetRoute -DestinationPrefix 203.0.113.0/24 -PolicyStore ActiveStore|Where-Object InterfaceAlias -eq $a.Name){Pass 'route readback'}else{throw 'route'};$g='HighGAS-V3-CI';New-NetFirewallRule -DisplayName 'HG v3 loop' -Group $g -Direction Outbound -Action Allow -RemoteAddress 127.0.0.0/8 -Profile Any|Out-Null;Pass 'firewall add';if(Get-NetFirewallRule -Group $g){Pass 'firewall readback'}else{throw 'fw'};Get-NetFirewallRule -Group $g|Remove-NetFirewallRule;Pass 'firewall remove'}finally{Get-NetRoute -DestinationPrefix 203.0.113.0/24 -PolicyStore ActiveStore -ErrorAction SilentlyContinue|Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue;Get-NetFirewallRule -Group HighGAS-V3-CI -ErrorAction SilentlyContinue|Remove-NetFirewallRule -ErrorAction SilentlyContinue;Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue}
+          if($n-lt20){throw "only $n"};Write-Host "TOTAL_NATIVE=$n"
+
+  tor:
+    runs-on: windows-latest
+    timeout-minutes: 22
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - exit: de
+            country: DE
+            socks: 39550
+            dns: 40550
+          - exit: us
+            country: US
+            socks: 39551
+            dns: 40551
+    steps:
+      - name: Run 20+ Tor country and DNS checks
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue';$n=0
+          function Pass([string]$x){$script:n++;Write-Host "TOR_PASS $script:n - $x"}
+          function DnsProbe([int]$Port){$u=New-Object Net.Sockets.UdpClient;$u.Client.ReceiveTimeout=7000;try{$q=[byte[]](0x12,0x34,0x01,0x00,0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x07,0x65,0x78,0x61,0x6d,0x70,0x6c,0x65,0x03,0x63,0x6f,0x6d,0x00,0x00,0x01,0x00,0x01);[void]$u.Send($q,$q.Length,'127.0.0.1',$Port);$ep=New-Object Net.IPEndPoint([Net.IPAddress]::Any,0);$r=$u.Receive([ref]$ep);return($r.Length-gt12-and($r[2]-band0x80)-ne0)}finally{$u.Dispose()}}
+          $b="$env:TEMP\tor3-${{ matrix.country }}";New-Item -ItemType Directory -Force $b|Out-Null;Invoke-WebRequest -UseBasicParsing "https://archive.torproject.org/tor-package-archive/torbrowser/$env:TOR_VERSION/tor-expert-bundle-windows-x86_64-$env:TOR_VERSION.tar.gz" -OutFile "$b\tor.tgz";Pass 'download';tar -xzf "$b\tor.tgz" -C $b
+          $tor="$b\tor\tor.exe";$geo="$b\data\geoip";$geo6="$b\data\geoip6";$data="$b\runtime";New-Item -ItemType Directory -Force $data|Out-Null;foreach($f in @($tor,$geo,$geo6)){if(Test-Path $f){Pass "file $([IO.Path]::GetFileName($f))"}else{throw $f}}
+          $log="$b\tor.log";$err="$b\tor.err";$arg="--SocksPort `"127.0.0.1:${{ matrix.socks }}`" --DNSPort `"127.0.0.1:${{ matrix.dns }}`" --DataDirectory `"$data`" --GeoIPFile `"$geo`" --GeoIPv6File `"$geo6`" --ExitNodes `"{${{ matrix.exit }}}`" --StrictNodes 1 --ClientUseIPv6 0 --Log `"notice stdout`"";$p=Start-Process $tor -ArgumentList $arg -PassThru -WindowStyle Hidden -RedirectStandardOutput $log -RedirectStandardError $err
+          try{for($i=0;$i-lt360;$i++){if($p.HasExited){Get-Content $log,$err -ErrorAction SilentlyContinue;throw 'tor exited'};if((Test-Path $log)-and(Select-String -Path $log -Pattern 'Bootstrapped 100%' -SimpleMatch -Quiet)){break};Start-Sleep -Milliseconds 500};if(!(Select-String -Path $log -Pattern 'Bootstrapped 100%' -SimpleMatch -Quiet)){Get-Content $log,$err -ErrorAction SilentlyContinue;throw 'bootstrap'};Pass 'bootstrap';$x=&curl.exe -fsS --socks5-hostname "127.0.0.1:${{ matrix.socks }}" --connect-timeout 8 --max-time 30 https://1.1.1.1/cdn-cgi/trace;if($LASTEXITCODE-eq0){Pass 'SOCKS'}else{throw 'socks'};if($x-match'(?m)^ip='){Pass 'exit ip'}else{throw 'ip'};if($x-match'(?m)^loc=${{ matrix.country }}\r?$'){Pass 'country'}else{$x|Write-Host;throw 'country'};if(DnsProbe ${{ matrix.dns }}){Pass 'Tor DNS UDP'}else{throw 'dns'};if(Get-NetTCPConnection -OwningProcess $p.Id -State Established -ErrorAction SilentlyContinue|Where-Object RemoteAddress -notlike'127.*'){Pass 'guard'}else{throw 'guard'};1..10|ForEach-Object{$r=&curl.exe -fsS --socks5-hostname "127.0.0.1:${{ matrix.socks }}" --connect-timeout 6 --max-time 20 https://1.1.1.1/cdn-cgi/trace;if($LASTEXITCODE-eq0-and$r-match'(?m)^loc=${{ matrix.country }}\r?$'){Pass "repeat $_"}else{throw "repeat $_"}}}finally{Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue}
+          if($n-lt20){throw "only $n"};Write-Host "TOTAL_TOR=$n"
+
+  e2e:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    needs: primitives
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - exit: de
+            country: DE
+            socks: 39650
+          - exit: us
+            country: US
+            socks: 39651
+    steps:
+      - name: Prove direct TCP uses Wintun then Tor
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue';$n=0
+          function Pass([string]$x){$script:n++;Write-Host "E2E_PASS $script:n - $x"}
+          $b="$env:TEMP\e2e3-${{ matrix.country }}";New-Item -ItemType Directory -Force $b|Out-Null;Invoke-WebRequest -UseBasicParsing "https://archive.torproject.org/tor-package-archive/torbrowser/$env:TOR_VERSION/tor-expert-bundle-windows-x86_64-$env:TOR_VERSION.tar.gz" -OutFile "$b\tor.tgz";tar -xzf "$b\tor.tgz" -C $b;$tor="$b\tor\tor.exe";$geo="$b\data\geoip";$geo6="$b\data\geoip6";$data="$b\td";New-Item -ItemType Directory -Force $data|Out-Null
+          Invoke-WebRequest -UseBasicParsing "https://github.com/xjasonlyu/tun2socks/releases/download/v$env:TUN2SOCKS_VERSION/tun2socks-windows-amd64.zip" -OutFile "$b\t.zip";if((Get-FileHash "$b\t.zip" -Algorithm SHA256).Hash.ToLowerInvariant()-ne$env:TUN2SOCKS_SHA256){throw 'sha'};Pass 'tun sha';Expand-Archive "$b\t.zip" "$b\t" -Force;$tun=(Get-ChildItem "$b\t" -Recurse -File|Where-Object Name -like'tun2socks*.exe'|Select-Object -First 1).FullName;Invoke-WebRequest -UseBasicParsing "https://www.wintun.net/builds/wintun-$env:WINTUN_VERSION.zip" -OutFile "$b\w.zip";Expand-Archive "$b\w.zip" "$b\w" -Force;$dll=(Get-ChildItem "$b\w" -Recurse -File -Filter wintun.dll|Where-Object FullName -match'amd64'|Select-Object -First 1).FullName;Copy-Item $dll (Split-Path $tun) -Force;Pass 'wintun copied'
+          $log="$b\tor.log";$err="$b\tor.err";$arg="--SocksPort `"127.0.0.1:${{ matrix.socks }}`" --DataDirectory `"$data`" --GeoIPFile `"$geo`" --GeoIPv6File `"$geo6`" --ExitNodes `"{${{ matrix.exit }}}`" --StrictNodes 1 --ClientUseIPv6 0 --Log `"notice stdout`"";$tp=Start-Process $tor -ArgumentList $arg -PassThru -WindowStyle Hidden -RedirectStandardOutput $log -RedirectStandardError $err;$tunp=$null;$a=$null
+          try{for($i=0;$i-lt360;$i++){if($tp.HasExited){Get-Content $log,$err -ErrorAction SilentlyContinue;throw 'tor exit'};if((Test-Path $log)-and(Select-String -Path $log -Pattern 'Bootstrapped 100%' -SimpleMatch -Quiet)){break};Start-Sleep -Milliseconds 500};if(!(Select-String -Path $log -Pattern 'Bootstrapped 100%' -SimpleMatch -Quiet)){throw 'bootstrap'};Pass 'tor ready';$pre=&curl.exe -fsS --socks5-hostname "127.0.0.1:${{ matrix.socks }}" --max-time 25 https://1.1.1.1/cdn-cgi/trace;if($pre-match'(?m)^loc=${{ matrix.country }}\r?$'){Pass 'proxy country'}else{throw 'proxy country'};$tunp=Start-Process $tun -ArgumentList "--device wintun --proxy socks5://127.0.0.1:${{ matrix.socks }} --loglevel debug" -WorkingDirectory (Split-Path $tun) -PassThru -WindowStyle Hidden -RedirectStandardOutput "$b\tun.out" -RedirectStandardError "$b\tun.err";for($i=0;$i-lt100;$i++){if($tunp.HasExited){Get-Content "$b\tun.out","$b\tun.err" -ErrorAction SilentlyContinue;throw 'tun exit'};$a=Get-NetAdapter -ErrorAction SilentlyContinue|Where-Object{$_.Name-eq'wintun'-or$_.InterfaceDescription-match'Wintun'}|Select-Object -First 1;if($a){break};Start-Sleep -Milliseconds 200};if(!$a){throw 'adapter'};Pass 'Wintun';netsh interface ipv4 set address name="$($a.Name)" source=static addr=192.168.123.1 mask=255.255.255.0 gateway=none|Out-Null;if($LASTEXITCODE-ne0){throw 'netsh'};Pass 'Wintun IP';New-NetRoute -DestinationPrefix 1.1.1.1/32 -InterfaceAlias $a.Name -NextHop 192.168.123.1 -RouteMetric 1 -PolicyStore ActiveStore|Out-Null;Pass 'route';if(Get-NetRoute -DestinationPrefix 1.1.1.1/32 -PolicyStore ActiveStore|Where-Object InterfaceAlias -eq $a.Name){Pass 'route readback'}else{throw 'route'};Start-Sleep -Seconds 1;$post=&curl.exe -fsS --connect-timeout 8 --max-time 30 https://1.1.1.1/cdn-cgi/trace;if($LASTEXITCODE-eq0){Pass 'direct TCP'}else{Get-Content "$b\tun.out","$b\tun.err" -ErrorAction SilentlyContinue;throw 'curl'};if($post-match'(?m)^loc=${{ matrix.country }}\r?$'){Pass 'direct country'}else{$post|Write-Host;throw 'country'};if($post-match'(?m)^ip='){Pass 'direct exit ip'};1..6|ForEach-Object{$r=&curl.exe -fsS --connect-timeout 6 --max-time 20 https://1.1.1.1/cdn-cgi/trace;if($r-match'(?m)^loc=${{ matrix.country }}\r?$'){Pass "repeat $_"}else{throw "repeat $_"}}}finally{Get-NetRoute -DestinationPrefix 1.1.1.1/32 -PolicyStore ActiveStore -ErrorAction SilentlyContinue|Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue;if($tunp){Stop-Process -Id $tunp.Id -Force -ErrorAction SilentlyContinue};Stop-Process -Id $tp.Id -Force -ErrorAction SilentlyContinue}
+          if($n-lt14){throw "only $n"};Write-Host "TOTAL_E2E=$n"
