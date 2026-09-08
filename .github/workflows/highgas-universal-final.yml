@@ -165,7 +165,8 @@ jobs:
           set -euo pipefail
           test "$(uname -m)" = x86_64
           BASE='/Library/Application Support/HighGAS'
-          sudo rm -rf "$BASE";sudo mkdir -p "$BASE" /tmp/hg-tor /tmp/hg-t2s
+          sudo rm -rf "$BASE";sudo mkdir -p "$BASE"
+          rm -rf /tmp/hg-tor /tmp/hg-t2s;mkdir -p /tmp/hg-tor /tmp/hg-t2s
           curl -fL --retry 3 "https://archive.torproject.org/tor-package-archive/torbrowser/${TOR_VERSION}/tor-expert-bundle-macos-x86_64-${TOR_VERSION}.tar.gz" -o /tmp/tor.tgz
           tar -xzf /tmp/tor.tgz -C /tmp/hg-tor
           curl -fL --retry 3 "https://github.com/xjasonlyu/tun2socks/releases/download/v${TUN2SOCKS_VERSION}/tun2socks-darwin-amd64.zip" -o /tmp/t2s.zip
