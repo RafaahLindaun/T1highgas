@@ -15,6 +15,7 @@ PIDFILE="$RUNTIME/tor.pid"
 TUNPID="$RUNTIME/tun2socks.pid"
 LOG="$RUNTIME/tor.log"
 TUNLOG="$RUNTIME/tun2socks.log"
+TUNNAME="$RUNTIME/tun.name"
 PFTOKEN="$RUNTIME/pf.token"
 PFANCHOR="com.apple/highgas"
 PFUSER="_www"
@@ -126,7 +127,7 @@ down() {
   remove_pf || true
   kill_pidfile "$TUNPID" || true
   kill_pidfile "$PIDFILE" || true
-  /bin/rm -f "$STATE" >/dev/null 2>&1 || true
+  /bin/rm -f "$TUNNAME" "$STATE" >/dev/null 2>&1 || true
   /usr/bin/killall -HUP mDNSResponder >/dev/null 2>&1 || true
   print -r -- "disconnected"
 }
@@ -350,8 +351,6 @@ up() {
   /usr/sbin/lsof -nP -a -p "$torpid" -iUDP:"$DNS_PORT" >/dev/null 2>&1 || { print -u2 "o DNS protegido do Tor não iniciou"; down >/dev/null 2>&1 || true; return 7; }
   dns_probe || { print -u2 "o DNS protegido não respondeu"; down >/dev/null 2>&1 || true; return 7; }
 
-  iface="$(choose_utun)" || { print -u2 "não encontrei uma interface de túnel livre"; down >/dev/null 2>&1 || true; return 8; }
-
   {
     print -r -- "SERVICE=$svc"
     print -r -- "DEVICE=$dev"
@@ -363,7 +362,6 @@ up() {
     print -r -- "SERVER=$server"
     print -r -- "BASELINE_IP=$baseline"
     print -r -- "TOR_PROBE_IP=${torprobe%%|*}"
-    print -r -- "IFACE=$iface"
     print -r -- "STARTED_AT=$(/bin/date +%s)"
   } > "$STATE"
   /bin/chmod 600 "$STATE"
@@ -374,15 +372,20 @@ up() {
   # O proxy está em localhost. Não prender tun2socks à interface física: isso
   # pode impedir a conexão com 127.0.0.1. Quem sai fisicamente é o Tor (_www),
   # explicitamente autorizado pelo PF acima.
-  "$TUN2SOCKS" -device "$iface" -proxy "socks5://127.0.0.1:$SOCKS_PORT" >"$TUNLOG" 2>&1 &
+  /bin/rm -f "$TUNNAME" >/dev/null 2>&1 || true
+  /usr/bin/env WG_TUN_NAME_FILE="$TUNNAME" "$TUN2SOCKS" --device utun --proxy "socks5://127.0.0.1:$SOCKS_PORT" >"$TUNLOG" 2>&1 &
   tunpid=$!
   print -r -- "$tunpid" > "$TUNPID"
   for _ in {1..100}; do
-    /sbin/ifconfig "$iface" >/dev/null 2>&1 && break
-    /bin/kill -0 "$tunpid" >/dev/null 2>&1 || { print -u2 "o motor Full Tunnel encerrou ao iniciar"; down >/dev/null 2>&1 || true; return 10; }
+    [[ -s "$TUNNAME" ]] && break
+    /bin/kill -0 "$tunpid" >/dev/null 2>&1 || { print -u2 "o motor Full Tunnel encerrou ao iniciar"; [[ -s "$TUNLOG" ]] && /bin/cat "$TUNLOG" >&2; down >/dev/null 2>&1 || true; return 10; }
     /bin/sleep 0.1
   done
+  [[ -s "$TUNNAME" ]] || { print -u2 "o macOS não informou a interface Full Tunnel"; [[ -s "$TUNLOG" ]] && /bin/cat "$TUNLOG" >&2; down >/dev/null 2>&1 || true; return 10; }
+  iface="$(/bin/cat "$TUNNAME" 2>/dev/null | /usr/bin/tr -d '\r\n')"
+  [[ "$iface" =~ ^utun[0-9]+$ ]] || { print -u2 "nome de interface Full Tunnel inválido: $iface"; down >/dev/null 2>&1 || true; return 10; }
   /sbin/ifconfig "$iface" >/dev/null 2>&1 || { print -u2 "a interface Full Tunnel não foi criada"; down >/dev/null 2>&1 || true; return 10; }
+  print -r -- "IFACE=$iface" >> "$STATE"
 
   /sbin/ifconfig "$iface" inet "$TUN_ADDR" "$TUN_ADDR" up >/dev/null
   local r
