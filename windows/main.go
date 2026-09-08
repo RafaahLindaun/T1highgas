@@ -29,7 +29,7 @@ import (
 )
 
 const (
-	version    = "1.1.0-windows"
+	version    = "1.1.1-windows"
 	addr       = "127.0.0.1:37654"
 	siteURL    = "https://lowgas.vercel.app"
 	cookieName = "highgas_session"
@@ -438,7 +438,35 @@ func runPS(script string, args ...string) error { _, err := runPSOutput(script, 
 func runPSOutput(script string, args ...string) ([]byte, error) {
 	psArgs := []string{"-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script}
 	psArgs = append(psArgs, args...)
-	return exec.Command("powershell.exe", psArgs...).CombinedOutput()
+
+	// Do not use CombinedOutput here. highgas-tor.ps1 intentionally starts
+	// long-lived Tor/sing-box children; on Windows inherited stdout/stderr pipe
+	// handles can keep os/exec waiting after PowerShell itself has exited.
+	// A real file gives PowerShell a non-pipe handle, so Run waits only for the
+	// controller process while we can still return its diagnostics to the API.
+	f, err := os.CreateTemp("", "highgas-ps-*.log")
+	if err != nil {
+		return nil, err
+	}
+	name := f.Name()
+	defer os.Remove(name)
+
+	cmd := exec.Command("powershell.exe", psArgs...)
+	cmd.Stdout = f
+	cmd.Stderr = f
+	runErr := cmd.Run()
+	closeErr := f.Close()
+	b, readErr := os.ReadFile(name)
+	if runErr != nil {
+		return b, runErr
+	}
+	if closeErr != nil {
+		return b, closeErr
+	}
+	if readErr != nil {
+		return b, readErr
+	}
+	return b, nil
 }
 func trimDetail(s string) string {
 	s = strings.TrimSpace(s)
