@@ -193,12 +193,19 @@ function Enable-KillSwitch([object]$Physical,[object]$FirewallState) {
 
 function Start-Tun([object]$Physical) {
   Remove-Item -LiteralPath $TunLog -Force -ErrorAction SilentlyContinue
-  $args = @('--device','wintun','--proxy',"socks5://127.0.0.1:$SocksPort",'--interface',[string]$Physical.Alias,'--loglevel','info')
+  # No Windows 11/Server, --interface usa a API de interface Go e pode não mapear o InterfaceAlias do NetTCPIP.
+  # O Tor já fica preso ao IPv4 físico por --OutboundBindAddress e os relays recebem rotas /32 explícitas,
+  # portanto o tun2socks só precisa do Wintun e do SOCKS local.
+  $args = @('--device','wintun','--proxy',"socks5://127.0.0.1:$SocksPort",'--loglevel','info')
   $p = Start-Process -FilePath $TunExe -ArgumentList $args -WorkingDirectory $Base -WindowStyle Hidden -PassThru -RedirectStandardOutput $TunLog -RedirectStandardError (Join-Path $Runtime 'tun2socks-error.log')
   $adapter = $null
   for ($i=0;$i -lt 100;$i++) {
-    if ($p.HasExited) { throw 'tun2socks encerrou antes de criar o Wintun.' }
-    $adapter = Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq 'wintun' -or $_.InterfaceDescription -match '(?i)Wintun' } | Select-Object -First 1
+    if ($p.HasExited) {
+      $detail = ''
+      try { $detail = (Get-Content -LiteralPath (Join-Path $Runtime 'tun2socks-error.log') -Raw -ErrorAction SilentlyContinue) } catch {}
+      throw "tun2socks encerrou antes de criar o Wintun. $detail"
+    }
+    $adapter = Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq 'wintun' -or $_.InterfaceDescription -match '(?i)Wintun|tun2socks Tunnel' } | Select-Object -First 1
     if ($adapter) { break }
     Start-Sleep -Milliseconds 200
   }
