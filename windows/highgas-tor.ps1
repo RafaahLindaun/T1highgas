@@ -49,7 +49,12 @@ function Stop-TrackedProcess([string]$Path, [string]$Name) {
     try { Stop-Process -Id $pidValue -Force -ErrorAction SilentlyContinue } catch {}
   }
   Get-Process -Name $Name -ErrorAction SilentlyContinue | ForEach-Object {
-    try { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue } catch {}
+    try {
+      $exePath = $_.Path
+      if ($exePath -and $exePath.StartsWith($Base, [StringComparison]::OrdinalIgnoreCase)) {
+        Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+      }
+    } catch {}
   }
   Remove-Item -Force $Path -ErrorAction SilentlyContinue
 }
@@ -112,7 +117,7 @@ function Write-SingBoxConfig {
   "log": { "level": "info", "timestamp": true },
   "dns": {
     "servers": [
-      { "type": "udp", "tag": "tor-dns", "server": "127.0.0.1", "server_port": 39053, "detour": "direct" }
+      { "type": "udp", "tag": "tor-dns", "server": "127.0.0.1", "server_port": 39053 }
     ],
     "final": "tor-dns",
     "strategy": "ipv4_only",
