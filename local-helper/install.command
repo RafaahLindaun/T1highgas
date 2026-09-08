@@ -25,7 +25,6 @@ done
 echo "O HighGAS precisa da senha administrativa uma única vez para instalar Full Tunnel, Kill Switch, Tor e WireGuard."
 sudo -v
 
-# Se uma versão anterior estiver ativa, restaura a rede antes de substituir os binários.
 if sudo /bin/test -x "$SYSTEM/highgas-tor"; then
   sudo "$SYSTEM/highgas-tor" down >/dev/null 2>&1 || true
 fi
@@ -94,11 +93,9 @@ else
 fi
 
 sudo /usr/sbin/chown -R root:wheel "$SYSTEM"
-# A pasta raiz é somente atravessável (não listável) pelo usuário isolado do Tor.
 sudo /bin/chmod 711 "$SYSTEM"
 sudo /bin/chmod 700 "$SYSTEM/profiles" "$CERTDIR" "$SYSTEM/highgas-helper" "$SYSTEM/highgas-tunnel" "$SYSTEM/highgas-tor" "$SYSTEM/wireguard-go" "$SYSTEM/tun2socks"
 sudo /bin/chmod 644 "$SYSTEM/highgas-local-controller.js"
-# Tor inicia como root e cai para _www. Binário/GeoIP não têm segredo e precisam continuar legíveis após a queda de privilégio.
 sudo /usr/bin/find "$SYSTEM/tor-expert" -type d -exec /bin/chmod 755 {} +
 sudo /usr/bin/find "$SYSTEM/tor-expert" -type f -exec /bin/chmod 644 {} +
 sudo /bin/chmod 755 "$SYSTEM/tor-expert/tor/tor"
@@ -141,9 +138,20 @@ sudo /bin/chmod 644 "$PLIST"
 sudo /bin/launchctl bootstrap system "$PLIST"
 sudo /bin/launchctl enable system/app.highgas.helper >/dev/null 2>&1 || true
 sudo /bin/launchctl kickstart -k system/app.highgas.helper
-sleep 1
 
-HEALTH="$(sudo /usr/bin/curl -fsS --max-time 5 --cacert "$CACERT" https://127.0.0.1:37654/v1/health 2>/dev/null || true)"
+HEALTH=""
+for attempt in {1..40}; do
+  HEALTH="$(sudo /usr/bin/curl -fsS --connect-timeout 2 --max-time 4 --cacert "$CACERT" https://127.0.0.1:37654/v1/health 2>/dev/null || true)"
+  if [[ "$HEALTH" == *'"torReady":true'* && "$HEALTH" == *'"controllerReady":true'* ]] && sudo /bin/test -x "$SYSTEM/tun2socks"; then
+    break
+  fi
+  if ! sudo /bin/launchctl print system/app.highgas.helper >/dev/null 2>&1; then
+    sudo /bin/launchctl bootstrap system "$PLIST" >/dev/null 2>&1 || true
+  fi
+  sudo /bin/launchctl kickstart -k system/app.highgas.helper >/dev/null 2>&1 || true
+  sleep 0.5
+done
+
 if [[ "$HEALTH" == *'"torReady":true'* && "$HEALTH" == *'"controllerReady":true'* ]] && sudo /bin/test -x "$SYSTEM/tun2socks"; then
   echo "HighGAS Full Tunnel instalado: Tor + Kill Switch + DNS protegido + controlador local."
   WEBLOC="$HOME/Desktop/HighGAS.webloc"
@@ -160,6 +168,10 @@ EOF_WEBLOC
   fi
 else
   echo "O serviço não passou na verificação final. Log: $SYSTEM/helper-error.log"
+  echo "Estado launchd:"
+  sudo /bin/launchctl print system/app.highgas.helper 2>&1 | /usr/bin/tail -n 30 || true
+  echo "Últimas linhas do helper:"
+  sudo /usr/bin/tail -n 50 "$SYSTEM/helper-error.log" 2>/dev/null || true
   echo "Não vou abrir o HighGAS até todos os motores estarem saudáveis."
   exit 20
 fi
