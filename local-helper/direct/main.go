@@ -141,7 +141,7 @@ func main() {
 		Handler:           a.securityHeaders(mux),
 		ReadHeaderTimeout: 3 * time.Second,
 		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      260 * time.Second,
+		WriteTimeout:      450 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
 	if err := s.ListenAndServeTLS(certFile, keyFile); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -390,7 +390,7 @@ func (a *app) connect(w http.ResponseWriter, r *http.Request) {
 		a.mu.Lock()
 		defer a.mu.Unlock()
 		_ = exec.Command(tunnel, "down").Run()
-		ctx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 420*time.Second)
 		defer cancel()
 		b, err := exec.CommandContext(ctx, torctl, "up", q.Server).CombinedOutput()
 		if ctx.Err() != nil {

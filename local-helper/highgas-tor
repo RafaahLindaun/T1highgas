@@ -309,8 +309,9 @@ up() {
   baseline="$(baseline_ip "$dev")"
   [[ -n "$baseline" ]] || { print -u2 "não consegui registrar o IP anterior antes de ligar"; return 3; }
 
-  /bin/rm -rf "$DATADIR"
-  /bin/mkdir -p "$DATADIR"
+  # Mantém consensus/microdescriptors entre sessões. Isso reduz muito o
+# tempo de reconexão e evita baixar todo o diretório Tor a cada clique.
+/bin/mkdir -p "$DATADIR"
   /usr/sbin/chown -R "$PFUSER" "$RUNTIME"
   /bin/chmod 700 "$RUNTIME" "$DATADIR" >/dev/null 2>&1 || true
   : > "$LOG"
@@ -342,7 +343,6 @@ up() {
     --User "$PFUSER" \
     --ClientOnly 1 \
     --RunAsDaemon 1 \
-    --AvoidDiskWrites 1 \
     --ClientUseIPv6 0 \
     --SocksPort "127.0.0.1:$SOCKS_PORT" \
     --DNSPort "127.0.0.1:$DNS_PORT" \
@@ -361,7 +361,7 @@ up() {
   torpid="$(/bin/cat "$PIDFILE" 2>/dev/null || true)"
   [[ -n "$torpid" ]] || { print -u2 "Tor iniciou sem registrar PID"; down >/dev/null 2>&1 || true; return 5; }
 
-  for _ in {1..150}; do
+  for _ in {1..300}; do
     if /usr/bin/grep -q "Bootstrapped 100%" "$LOG" 2>/dev/null; then booted=1; break; fi
     /bin/kill -0 "$torpid" >/dev/null 2>&1 || { print -u2 "Tor encerrou antes de conectar"; down >/dev/null 2>&1 || true; return 6; }
     /bin/sleep 1
