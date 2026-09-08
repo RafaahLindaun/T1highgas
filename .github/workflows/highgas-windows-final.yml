@@ -20,7 +20,7 @@ env:
 jobs:
   windows-final:
     runs-on: windows-2025
-    timeout-minutes: 45
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
 
@@ -47,10 +47,12 @@ jobs:
           $null = [scriptblock]::Create((Get-Content -Raw windows/highgas-tor.ps1))
           $null = [scriptblock]::Create((Get-Content -Raw windows/install.ps1))
           $null = [scriptblock]::Create((Get-Content -Raw windows/uninstall.ps1))
-          if ((Get-Content -Raw windows/highgas-tor.ps1) -notmatch 'strict_route') { throw 'strict_route missing' }
-          if ((Get-Content -Raw windows/highgas-tor.ps1) -notmatch 'process_name.*tor.exe') { throw 'tor process bypass missing' }
-          if ((Get-Content -Raw windows/highgas-tor.ps1) -notmatch 'ip_version.*6.*reject') { throw 'IPv6 reject missing' }
-          if ((Get-Content -Raw windows/highgas-tor.ps1) -notmatch 'network.*udp.*reject') { throw 'UDP reject missing' }
+          $script = Get-Content -Raw windows/highgas-tor.ps1
+          if ($script -notmatch 'strict_route') { throw 'strict_route missing' }
+          if ($script -notmatch 'process_name.*tor.exe') { throw 'tor process bypass missing' }
+          if ($script -notmatch 'ip_version.*6.*reject') { throw 'IPv6 reject missing' }
+          if ($script -notmatch 'network.*udp.*reject') { throw 'UDP reject missing' }
+          if ($script -match 'function Start-Tracked\([^\r\n]*\$Args') { throw 'reserved Args regression' }
 
       - name: Assemble pinned offline payload
         shell: pwsh
@@ -125,33 +127,103 @@ jobs:
           $status = Invoke-RestMethod -UseBasicParsing -Headers $headers -Uri 'https://127.0.0.1:37654/v1/status' -TimeoutSec 10
           if ($status.connected) { throw 'helper should start disconnected' }
 
-      - name: One-pass real full-tunnel runtime gate
+      - name: 20 successful real full-tunnel cycles
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $base = Join-Path $env:ProgramData 'HighGAS'
           $token = (Get-Content -Raw (Join-Path $base 'helper.token')).Trim()
           $headers = @{ Authorization = "Bearer $token" }
-          $baseline = Invoke-RestMethod -UseBasicParsing -Uri 'https://lowgas.vercel.app/api/network-info' -TimeoutSec 15
-          try {
-            $body = @{ server = 'de-fra-01' } | ConvertTo-Json -Compress
-            $connect = Invoke-RestMethod -UseBasicParsing -Headers $headers -ContentType 'application/json' -Method Post -Body $body -Uri 'https://127.0.0.1:37654/v1/connect' -TimeoutSec 260
-            if (-not $connect.ok -or $connect.country -ne 'DE') { throw 'DE connect response invalid' }
-            foreach ($name in @('ip_changed','country','tor_ip_match','ipv6_blocked','tun_adapter','singbox_alive','tor_alive')) {
-              if (-not $connect.checks.$name) { throw "runtime check failed: $name" }
+          $report = Join-Path $env:PACKAGE_DIR 'VALIDATION-20X.txt'
+          Set-Content -Path $report -Value '' -Encoding utf8
+
+          function Get-NetworkInfo {
+            for ($i = 1; $i -le 3; $i++) {
+              try {
+                return Invoke-RestMethod -UseBasicParsing -Uri 'https://lowgas.vercel.app/api/network-info' -TimeoutSec 25
+              } catch {
+                if ($i -eq 3) { throw }
+                Start-Sleep -Seconds 2
+              }
             }
-            $net = Invoke-RestMethod -UseBasicParsing -Headers $headers -Uri 'https://127.0.0.1:37654/api/network-info' -TimeoutSec 30
-            if ($net.country -ne 'DE') { throw "system tunnel country mismatch: $($net.country)" }
-            if ($baseline.ip -and $net.ip -eq $baseline.ip) { throw 'system public IP did not change' }
-          } finally {
-            try { Invoke-RestMethod -UseBasicParsing -Headers $headers -ContentType 'application/json' -Method Post -Body '{}' -Uri 'https://127.0.0.1:37654/v1/disconnect' -TimeoutSec 60 | Out-Null } catch {}
           }
-          Start-Sleep -Seconds 2
-          $status = Invoke-RestMethod -UseBasicParsing -Headers $headers -Uri 'https://127.0.0.1:37654/v1/status' -TimeoutSec 10
-          if ($status.connected) { throw 'disconnect did not restore state' }
-          $direct = Invoke-RestMethod -UseBasicParsing -Uri 'https://lowgas.vercel.app/api/network-info' -TimeoutSec 15
-          if (-not $direct.ip) { throw 'direct connectivity was not restored' }
-          Write-Host 'WINDOWS_REAL_FULL_TUNNEL=PASS'
+
+          function Disconnect-HighGAS {
+            try {
+              Invoke-RestMethod -UseBasicParsing -Headers $headers -ContentType 'application/json' -Method Post -Body '{}' -Uri 'https://127.0.0.1:37654/v1/disconnect' -TimeoutSec 60 | Out-Null
+            } catch {}
+            Start-Sleep -Seconds 1
+          }
+
+          $baseline = Get-NetworkInfo
+          for ($cycle = 1; $cycle -le 20; $cycle++) {
+            if (($cycle % 2) -eq 1) { $server = 'de-fra-01'; $expected = 'DE' } else { $server = 'us-mia-01'; $expected = 'US' }
+            "CYCLE=$cycle SERVER=$server EXPECTED=$expected" | Tee-Object -FilePath $report -Append | Write-Host
+            $passed = $false
+
+            for ($attempt = 1; $attempt -le 5; $attempt++) {
+              Disconnect-HighGAS
+              "CYCLE=$cycle ATTEMPT=$attempt" | Tee-Object -FilePath $report -Append | Write-Host
+              try {
+                $body = @{ server = $server } | ConvertTo-Json -Compress
+                $connect = Invoke-RestMethod -UseBasicParsing -Headers $headers -ContentType 'application/json' -Method Post -Body $body -Uri 'https://127.0.0.1:37654/v1/connect' -TimeoutSec 300
+                if (-not $connect.ok -or $connect.country -ne $expected) { throw 'connect response mismatch' }
+                foreach ($name in @('ip_changed','country','tor_ip_match','ipv6_blocked','tun_adapter','singbox_alive','tor_alive')) {
+                  if (-not $connect.checks.$name) { throw "connect check failed: $name" }
+                }
+
+                $status = Invoke-RestMethod -UseBasicParsing -Headers $headers -Uri 'https://127.0.0.1:37654/v1/status' -TimeoutSec 20
+                if (-not $status.connected -or $status.country -ne $expected -or $status.activeServer -ne $server) { throw 'status mismatch' }
+
+                $net = Invoke-RestMethod -UseBasicParsing -Headers $headers -Uri 'https://127.0.0.1:37654/api/network-info' -TimeoutSec 40
+                if ($net.country -ne $expected) { throw "system country mismatch: $($net.country)" }
+                if ($baseline.ip -and $net.ip -eq $baseline.ip) { throw 'system public IP did not change' }
+
+                $ipv6Code = & curl.exe -6 -fsS --connect-timeout 4 --max-time 7 'https://api64.ipify.org' *> $null; $ipv6Exit = $LASTEXITCODE
+                if ($ipv6Exit -eq 0) { throw 'IPv6 leak detected' }
+                if (-not (Get-NetAdapter -Name 'HighGAS' -ErrorAction SilentlyContinue)) { throw 'HighGAS TUN adapter missing' }
+                if (-not (Get-Process tor -ErrorAction SilentlyContinue)) { throw 'Tor process missing' }
+                if (-not (Get-Process sing-box -ErrorAction SilentlyContinue)) { throw 'sing-box process missing' }
+
+                $passed = $true
+                ('PASS cycle={0:D2} server={1} country={2} attempt={3} ip={4}' -f $cycle,$server,$expected,$attempt,$net.ip) | Tee-Object -FilePath $report -Append | Write-Host
+                break
+              } catch {
+                ('RETRY cycle={0:D2} attempt={1} error={2}' -f $cycle,$attempt,$_.Exception.Message) | Tee-Object -FilePath $report -Append | Write-Host
+                Disconnect-HighGAS
+                if ($attempt -lt 5) { Start-Sleep -Seconds 3 }
+              }
+            }
+
+            if (-not $passed) { throw "cycle $cycle failed after five attempts" }
+            Disconnect-HighGAS
+            $status = Invoke-RestMethod -UseBasicParsing -Headers $headers -Uri 'https://127.0.0.1:37654/v1/status' -TimeoutSec 15
+            if ($status.connected) { throw "cycle $cycle did not disconnect" }
+            $direct = Get-NetworkInfo
+            if (-not $direct.ip) { throw "cycle $cycle direct connectivity not restored" }
+          }
+
+          $passCount = @(Select-String -Path $report -Pattern '^PASS cycle=').Count
+          if ($passCount -ne 20) { throw "expected 20 PASS lines, got $passCount" }
+          Add-Content -Path $report -Value 'WINDOWS_20X_FULL_TUNNEL=PASS' -Encoding utf8
+          Write-Host 'WINDOWS_20X_FULL_TUNNEL=PASS'
+
+      - name: Final package integrity
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $report = Join-Path $env:PACKAGE_DIR 'VALIDATION-20X.txt'
+          if (-not (Test-Path $report)) { throw 'validation report missing' }
+          if (@(Select-String -Path $report -Pattern '^PASS cycle=').Count -ne 20) { throw '20-cycle proof missing' }
+          if (-not (Select-String -Path $report -Pattern '^WINDOWS_20X_FULL_TUNNEL=PASS$')) { throw 'final pass marker missing' }
+          foreach ($line in Get-Content (Join-Path $env:PACKAGE_DIR 'SHA256SUMS.txt')) {
+            if ($line -match '^([0-9a-f]{64})\s+(.+)$') {
+              $expected = $matches[1]
+              $rel = $matches[2].Replace('/','\')
+              $actual = (Get-FileHash -Algorithm SHA256 (Join-Path $env:PACKAGE_DIR $rel)).Hash.ToLowerInvariant()
+              if ($actual -ne $expected) { throw "integrity mismatch: $rel" }
+            } else { throw "invalid checksum line: $line" }
+          }
 
       - name: Uninstall and residue check
         if: always()
@@ -190,7 +262,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: success()
         with:
-          name: HighGAS-Final-Windows-x64
+          name: HighGAS-Final-Windows-x64-20x
           path: ${{ env.ZIP_PATH }}
           if-no-files-found: error
           retention-days: 30
