@@ -63,10 +63,10 @@ function Get-Target([string]$Code) {
 }
 
 function Invoke-NetworkInfo([switch]$ThroughTor) {
-  $args = @('-fsS','--connect-timeout','12','--max-time','25','-H','Cache-Control: no-cache')
-  if ($ThroughTor) { $args += @('--socks5-hostname',"127.0.0.1:$SocksPort") }
-  $args += "${CheckUrl}?ts=$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())"
-  $raw = & curl.exe @args 2>$null
+  $curlArgs = @('-fsS','--connect-timeout','12','--max-time','25','-H','Cache-Control: no-cache')
+  if ($ThroughTor) { $curlArgs += @('--socks5-hostname',"127.0.0.1:$SocksPort") }
+  $curlArgs += "${CheckUrl}?ts=$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())"
+  $raw = & curl.exe @curlArgs 2>$null
   if ($LASTEXITCODE -ne 0 -or -not $raw) { throw 'network_info_failed' }
   return ($raw | Out-String | ConvertFrom-Json)
 }
@@ -154,8 +154,16 @@ function Assert-SingBoxConfig {
   if ($LASTEXITCODE -ne 0) { throw 'sing-box config validation failed.' }
 }
 
-function Start-Tracked([string]$File, [string[]]$Args, [string]$PidPath, [string]$Stdout, [string]$Stderr) {
-  $p = Start-Process -FilePath $File -ArgumentList $Args -WindowStyle Hidden -PassThru -RedirectStandardOutput $Stdout -RedirectStandardError $Stderr
+function Start-Tracked {
+  param(
+    [Parameter(Mandatory=$true)][string]$File,
+    [Parameter(Mandatory=$true)][string[]]$ProcessArgs,
+    [Parameter(Mandatory=$true)][string]$PidPath,
+    [Parameter(Mandatory=$true)][string]$Stdout,
+    [Parameter(Mandatory=$true)][string]$Stderr
+  )
+  if (-not $ProcessArgs -or $ProcessArgs.Count -eq 0) { throw "No process arguments supplied for $File" }
+  $p = Start-Process -FilePath $File -ArgumentList $ProcessArgs -WindowStyle Hidden -PassThru -RedirectStandardOutput $Stdout -RedirectStandardError $Stderr
   Set-Content -Path $PidPath -Value $p.Id -Encoding Ascii
   return $p
 }
@@ -202,7 +210,7 @@ function Connect-HighGAS([string]$Code) {
   Write-TorConfig $target
   $torOut = Join-Path $Runtime 'tor.stdout.log'
   $torErr = Join-Path $Runtime 'tor.stderr.log'
-  $tor = Start-Tracked $TorExe @('-f',$Torrc) $TorPid $torOut $torErr
+  $tor = Start-Tracked -File $TorExe -ProcessArgs @('-f',$Torrc) -PidPath $TorPid -Stdout $torOut -Stderr $torErr
   Wait-TorBootstrap
 
   $torInfo = Invoke-NetworkInfo -ThroughTor
@@ -215,7 +223,7 @@ function Connect-HighGAS([string]$Code) {
   Assert-SingBoxConfig
   $singOut = Join-Path $Runtime 'singbox.stdout.log'
   $singErr = Join-Path $Runtime 'singbox.stderr.log'
-  $sing = Start-Tracked $SingBoxExe @('run','-c',$SingConfig) $SingPid $singOut $singErr
+  $sing = Start-Tracked -File $SingBoxExe -ProcessArgs @('run','-c',$SingConfig) -PidPath $SingPid -Stdout $singOut -Stderr $singErr
   Start-Sleep -Seconds 5
   if ($sing.HasExited) { throw "sing-box exited: $(Get-Content $singErr -Tail 100 -ErrorAction SilentlyContinue | Out-String)" }
 
