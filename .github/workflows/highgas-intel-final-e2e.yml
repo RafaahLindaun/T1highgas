@@ -1,0 +1,143 @@
+name: HighGAS Intel Final E2E
+
+on:
+  push:
+    branches: [highgas-full-tunnel-v1]
+    paths:
+      - '.github/workflows/highgas-intel-final-e2e.yml'
+
+permissions:
+  contents: read
+
+env:
+  TOR_EXPERT_VERSION: '15.0.21'
+  TUN2SOCKS_VERSION: '2.7.0'
+  TUN2SOCKS_AMD64_SHA256: '6e654da8bab9ca1645862f0e251a69980e0966680713011feea7b1e5901b2a95'
+
+jobs:
+  intel-e2e:
+    runs-on: macos-15-intel
+    timeout-minutes: 18
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - server: de-fra-01
+            expected: DE
+          - server: us-mia-01
+            expected: US
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prove real Intel host and stage product
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          sysctl -n machdep.cpu.brand_string
+          S='/Library/Application Support/HighGAS'
+          curl -fL --retry 3 "https://archive.torproject.org/tor-package-archive/torbrowser/${TOR_EXPERT_VERSION}/tor-expert-bundle-macos-x86_64-${TOR_EXPERT_VERSION}.tar.gz" -o /tmp/tor.tgz
+          curl -fL --retry 3 "https://github.com/xjasonlyu/tun2socks/releases/download/v${TUN2SOCKS_VERSION}/tun2socks-darwin-amd64.zip" -o /tmp/t2s.zip
+          echo "${TUN2SOCKS_AMD64_SHA256}  /tmp/t2s.zip" | shasum -a 256 -c -
+          rm -rf /tmp/hgtor /tmp/hgt2s && mkdir -p /tmp/hgtor /tmp/hgt2s
+          tar -xzf /tmp/tor.tgz -C /tmp/hgtor
+          unzip -q /tmp/t2s.zip -d /tmp/hgt2s
+          TUN="$(find /tmp/hgt2s -type f -name 'tun2socks*' ! -name '*.zip' ! -name '*LICENSE*' -print -quit)"
+          file "$TUN" | grep -Eqi 'x86_64|x86-64'
+          file /tmp/hgtor/tor/tor | grep -Eqi 'x86_64|x86-64'
+          sudo mkdir -p "$S"
+          sudo rm -rf "$S/tor-expert" "$S/tor-runtime" "$S/tor-state"
+          sudo cp -R /tmp/hgtor "$S/tor-expert"
+          sudo cp "$TUN" "$S/tun2socks"
+          sudo cp local-helper/highgas-tor "$S/highgas-tor"
+          sudo chown -R root:wheel "$S"
+          sudo chmod 711 "$S"
+          sudo find "$S/tor-expert" -type d -exec chmod 755 {} +
+          sudo find "$S/tor-expert" -type f -exec chmod 644 {} +
+          sudo chmod 755 "$S/highgas-tor" "$S/tun2socks" "$S/tor-expert/tor/tor"
+          zsh -n "$S/highgas-tor"
+
+      - name: Run native Intel lifecycle and leak checks
+        shell: bash
+        env:
+          SERVER: ${{ matrix.server }}
+          EXPECTED: ${{ matrix.expected }}
+        run: |
+          set -euo pipefail
+          S='/Library/Application Support/HighGAS'; HG="$S/highgas-tor"; C=0
+          ok(){ C=$((C+1)); echo "INTEL_PASS $C - $1"; }
+          trap 'sudo "$HG" down >/dev/null 2>&1 || true' EXIT
+
+          test "$(uname -m)" = x86_64; ok native-x86-64
+          id _www >/dev/null; ok isolated-user
+          sudo -u _www test -r "$S/tor-expert/data/geoip"; ok geoip-readable
+          sudo -u _www test -r "$S/tor-expert/data/geoip6"; ok geoip6-readable
+          file "$S/tun2socks" | grep -Eqi 'x86_64|x86-64'; ok native-tun2socks
+          file "$S/tor-expert/tor/tor" | grep -Eqi 'x86_64|x86-64'; ok native-tor
+          command -v pfctl >/dev/null; ok pfctl
+          command -v route >/dev/null; ok route
+          command -v networksetup >/dev/null; ok networksetup
+          command -v dig >/dev/null; ok dig
+
+          RI="$(route -n get default)"
+          DEV="$(printf '%s\n' "$RI"|awk '/interface:/{print $2;exit}')"
+          test -n "$DEV"; ok physical-device
+          BASE="$(curl -4 -fsS --interface "$DEV" --max-time 15 https://lowgas.vercel.app/api/network-info)"
+          BASEIP="$(printf '%s' "$BASE"|sed -n 's/.*"ip"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+          test -n "$BASEIP"; ok baseline-ip
+
+          OUT="$(sudo "$HG" up "$SERVER")"
+          printf '%s\n' "$OUT" | grep -q '^connected tor '; ok connected-result
+          printf '%s\n' "$OUT" | grep -q " $SERVER "; ok selected-server
+
+          STATE="$S/tor-state"
+          sudo test -s "$STATE"; ok state-present
+          IFACE="$(sudo awk -F= '$1=="IFACE"{print $2;exit}' "$STATE")"
+          PHY="$(sudo awk -F= '$1=="DEVICE"{print $2;exit}' "$STATE")"
+          [[ "$IFACE" =~ ^utun[0-9]+$ ]]; ok dynamic-utun
+          ifconfig "$IFACE" >/dev/null; ok utun-live
+          ifconfig "$IFACE" | grep -q 198.18.0.1; ok utun-address
+          route -n get 1.1.1.1 | grep -q "interface: $IFACE"; ok route-tunneled
+
+          SERVICE="$(sudo awk -F= '$1=="SERVICE"{print $2;exit}' "$STATE")"
+          test "$(networksetup -getdnsservers "$SERVICE")" = 127.0.0.1; ok protected-system-dns
+          dig +time=4 +tries=1 +short @127.0.0.1 lowgas.vercel.app A | grep -Eq '^[0-9]+(\.[0-9]+){3}$'; ok protected-dns-query
+
+          PF="$(sudo pfctl -a com.apple/highgas -sr)"
+          printf '%s\n' "$PF" | grep -q "block drop out quick on $PHY inet"; ok ipv4-killswitch
+          printf '%s\n' "$PF" | grep -q 'block drop out quick inet6'; ok ipv6-killswitch
+          printf '%s\n' "$PF" | grep -q "on $PHY inet proto tcp.*user"; ok tor-only-physical-egress
+          printf '%s\n' "$PF" | grep -q "on $IFACE.*route-to ($PHY"; ok tor-bypass-rule
+
+          if curl -4 -fsS --interface "$PHY" --connect-timeout 2 --max-time 5 https://lowgas.vercel.app/api/network-info >/tmp/intel-leak.json 2>/dev/null; then
+            echo 'physical leak detected'; cat /tmp/intel-leak.json; exit 41
+          fi
+          ok direct-physical-leak-blocked
+
+          V="$(sudo "$HG" verify)"; printf '%s\n' "$V"
+          printf '%s\n' "$V" | grep -q '^IP_CHANGED=1$'; ok ip-changed
+          printf '%s\n' "$V" | grep -q '^COUNTRY_OK=1$'; ok country-ok
+          printf '%s\n' "$V" | grep -q '^DNS_OK=1$'; ok dns-ok
+          printf '%s\n' "$V" | grep -q '^IPV6_OK=1$'; ok ipv6-no-leak
+          printf '%s\n' "$V" | grep -q '^ROUTE_OK=1$'; ok route-ok
+          printf '%s\n' "$V" | grep -q '^VERIFIED=1$'; ok aggregate-verified
+          VPNIP="$(printf '%s\n' "$V"|awk -F= '/^IP=/{print $2;exit}')"
+          CC="$(printf '%s\n' "$V"|awk -F= '/^COUNTRY=/{print $2;exit}')"
+          test -n "$VPNIP"; ok vpn-ip-present
+          test "$VPNIP" != "$BASEIP"; ok vpn-ip-different
+          test "$CC" = "$EXPECTED"; ok exact-country
+
+          ST="$(sudo "$HG" status)"
+          printf '%s\n' "$ST" | grep -q '^connected tor '; ok stable-status
+          printf '%s\n' "$ST" | grep -q " $SERVER "; ok stable-server-status
+
+          sudo "$HG" down | grep -q '^disconnected$'; ok disconnect
+          test "$(sudo "$HG" status)" = disconnected; ok disconnected-status
+          ! ifconfig "$IFACE" >/dev/null 2>&1; ok utun-removed
+          route -n get 1.1.1.1 | grep -q "interface: $DEV"; ok direct-route-restored
+          test -z "$(sudo pfctl -a com.apple/highgas -sr 2>/dev/null || true)"; ok pf-cleared
+          curl -4 -fsS --interface "$DEV" --max-time 15 https://lowgas.vercel.app/api/network-info | grep -q '"ip"'; ok internet-restored
+
+          trap - EXIT
+          echo "INTEL_NATIVE_TOTAL=$C"
+          test "$C" -ge 40
