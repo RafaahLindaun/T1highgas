@@ -1,0 +1,69 @@
+name: HighGAS Reliability Patch
+
+on:
+  push:
+    branches: [highgas-full-tunnel-v1]
+    paths:
+      - '.github/workflows/highgas-reliability-patch.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: highgas-full-tunnel-v1
+      - name: Add Tor exit retry and final helper timeouts
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq && sudo apt-get install -y -qq zsh
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('local-helper/highgas-tor')
+          s = p.read_text()
+          old = '''  torprobe="$(tor_probe "$expected" 2>/dev/null || true)"
+            [[ -n "$torprobe" ]] || { print -u2 "o Tor conectou, mas não confirmou a saída $expected"; down >/dev/null 2>&1 || true; return 7; }
+            print -r -- "TOR_PROBE_IP=${torprobe%%|*}" >> "$STATE"'''
+          new = '''  # O bootstrap 100% confirma a rede Tor, mas o primeiro circuito de saída
+            # ainda pode levar alguns segundos. Tenta novamente antes de desistir.
+            for _ in {1..12}; do
+              torprobe="$(tor_probe "$expected" 2>/dev/null || true)"
+              [[ -n "$torprobe" ]] && break
+              /bin/sleep 1
+            done
+            [[ -n "$torprobe" ]] || { print -u2 "o Tor conectou, mas não confirmou a saída $expected"; down >/dev/null 2>&1 || true; return 7; }
+            print -r -- "TOR_PROBE_IP=${torprobe%%|*}" >> "$STATE"'''
+          if old not in s:
+              raise SystemExit('Tor one-shot probe block not found')
+          s = s.replace(old, new, 1)
+          s = s.replace('--connect-timeout 8 --max-time 25 -H', '--connect-timeout 5 --max-time 10 -H', 1)
+          p.write_text(s)
+
+          p = Path('local-helper/direct/main.go')
+          s = p.read_text()
+          s = s.replace('version         = "0.7.0"', 'version         = "1.0.0"')
+          s = s.replace('WriteTimeout:      180 * time.Second,', 'WriteTimeout:      260 * time.Second,')
+          s = s.replace('context.WithTimeout(context.Background(), 165*time.Second)', 'context.WithTimeout(context.Background(), 240*time.Second)')
+          s = s.replace('"engine":          "tor+wireguard-go",', '"engine":          "highgas-full-tunnel",')
+          p.write_text(s)
+
+          p = Path('public/highgas-local-controller.js')
+          s = p.read_text().replace('timeoutMs: 180000', 'timeoutMs: 250000')
+          p.write_text(s)
+          PY
+          zsh -n local-helper/highgas-tor
+          grep -Fq 'for _ in {1..12}; do' local-helper/highgas-tor
+          grep -Fq 'version         = "1.0.0"' local-helper/direct/main.go
+          grep -Fq '240*time.Second' local-helper/direct/main.go
+          grep -Fq 'timeoutMs: 250000' public/highgas-local-controller.js
+          git diff --check
+          git config user.name 'HighGAS CI'
+          git config user.email '89591381+RafaahLindaun@users.noreply.github.com'
+          git add local-helper/highgas-tor local-helper/direct/main.go public/highgas-local-controller.js
+          git commit -m 'HighGAS: tolerar atraso do circuito Tor e ampliar timeout seguro'
+          git push origin HEAD:highgas-full-tunnel-v1

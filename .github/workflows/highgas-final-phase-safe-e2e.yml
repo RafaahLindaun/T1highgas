@@ -1,0 +1,191 @@
+name: HighGAS Final Phase-Safe E2E
+
+on:
+  push:
+    branches: [highgas-full-tunnel-v1]
+    paths:
+      - '.github/workflows/highgas-final-phase-safe-e2e.yml'
+
+permissions:
+  contents: read
+
+env:
+  TOR_EXPERT_VERSION: '15.0.21'
+  TUN2SOCKS_VERSION: '2.7.0'
+  TUN2SOCKS_AMD64_SHA256: '6e654da8bab9ca1645862f0e251a69980e0966680713011feea7b1e5901b2a95'
+
+jobs:
+  exact-product:
+    runs-on: macos-15
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - server: de-fra-01
+            expected: DE
+          - server: us-mia-01
+            expected: US
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Stage exact HighGAS engine
+        shell: bash
+        run: |
+          set -euo pipefail
+          S='/Library/Application Support/HighGAS'
+          curl -fL --retry 3 "https://archive.torproject.org/tor-package-archive/torbrowser/${TOR_EXPERT_VERSION}/tor-expert-bundle-macos-x86_64-${TOR_EXPERT_VERSION}.tar.gz" -o /tmp/tor.tgz
+          curl -fL --retry 3 "https://github.com/xjasonlyu/tun2socks/releases/download/v${TUN2SOCKS_VERSION}/tun2socks-darwin-amd64.zip" -o /tmp/t2s.zip
+          echo "${TUN2SOCKS_AMD64_SHA256}  /tmp/t2s.zip" | shasum -a 256 -c -
+          rm -rf /tmp/hgtor /tmp/hgt2s
+          mkdir -p /tmp/hgtor /tmp/hgt2s
+          tar -xzf /tmp/tor.tgz -C /tmp/hgtor
+          unzip -q /tmp/t2s.zip -d /tmp/hgt2s
+          TUN="$(find /tmp/hgt2s -type f -name 'tun2socks*' ! -name '*.zip' ! -name '*LICENSE*' -print -quit)"
+          test -n "$TUN" && test -f "$TUN"
+          sudo mkdir -p "$S"
+          sudo rm -rf "$S/tor-expert" "$S/tor-runtime" "$S/tor-state"
+          sudo cp -R /tmp/hgtor "$S/tor-expert"
+          sudo cp "$TUN" "$S/tun2socks"
+          sudo cp local-helper/highgas-tor "$S/highgas-tor"
+          sudo chown -R root:wheel "$S"
+          sudo chmod 711 "$S"
+          sudo find "$S/tor-expert" -type d -exec chmod 755 {} +
+          sudo find "$S/tor-expert" -type f -exec chmod 644 {} +
+          sudo chmod 755 "$S/highgas-tor" "$S/tun2socks" "$S/tor-expert/tor/tor"
+          zsh -n "$S/highgas-tor"
+          file "$S/tun2socks" | grep -Eqi 'x86_64|x86-64'
+          file "$S/tor-expert/tor/tor" | grep -Eqi 'x86_64|x86-64'
+          grep -Fq 'pf_enable_and_load "$dev" "$gw" "" yes' "$S/highgas-tor"
+          grep -Fq 'pf_enable_and_load "$dev" "$gw" "$iface" no' "$S/highgas-tor"
+
+      - name: Run 50-plus exact final checks
+        shell: bash
+        env:
+          SERVER: ${{ matrix.server }}
+          EXPECTED: ${{ matrix.expected }}
+        run: |
+          set -euo pipefail
+          S='/Library/Application Support/HighGAS'
+          HG="$S/highgas-tor"
+          N=0
+          ok(){ N=$((N+1)); echo "FINAL_PASS $N - $1"; }
+          trap 'sudo "$HG" down >/dev/null 2>&1 || true' EXIT
+
+          test "$(uname -m)" = x86_64 && ok intel-x86_64
+          id _www >/dev/null && ok isolated-tor-user
+          command -v /sbin/pfctl >/dev/null && ok pfctl
+          command -v /sbin/route >/dev/null && ok route
+          command -v /sbin/ifconfig >/dev/null && ok ifconfig
+          command -v /usr/sbin/networksetup >/dev/null && ok networksetup
+          command -v /usr/bin/dig >/dev/null && ok dig
+          command -v /usr/sbin/lsof >/dev/null && ok lsof
+          sudo test -x "$HG" && ok engine-executable
+          sudo test -x "$S/tun2socks" && ok tun2socks-executable
+          sudo test -x "$S/tor-expert/tor/tor" && ok tor-executable
+          sudo -u _www test -r "$S/tor-expert/data/geoip" && ok geoip-readable
+          sudo -u _www test -r "$S/tor-expert/data/geoip6" && ok geoip6-readable
+
+          RI="$(route -n get default)"
+          DEV="$(printf '%s\n' "$RI" | awk '/interface:/{print $2;exit}')"
+          GW="$(printf '%s\n' "$RI" | awk '/gateway:/{print $2;exit}')"
+          test -n "$DEV" && ok physical-device
+          test -n "$GW" && ok physical-gateway
+          SERVICE="$(networksetup -listnetworkserviceorder | awk -v dev="$DEV" '/^\([0-9]+\) /{svc=$0;sub(/^\([0-9]+\) /,"",svc)} index($0,"Device: "dev){sub(/^\*/,"",svc);print svc;exit}')"
+          test -n "$SERVICE" && ok network-service
+          DNS_BEFORE="$(networksetup -getdnsservers "$SERVICE" 2>/dev/null || true)"
+          BASEJSON="$(curl -4 -fsS --interface "$DEV" --connect-timeout 5 --max-time 15 https://lowgas.vercel.app/api/network-info)"
+          BASEIP="$(printf '%s' "$BASEJSON" | sed -n 's/.*"ip"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+          test -n "$BASEIP" && ok baseline-public-ip
+
+          START="$(date +%s)"
+          set +e
+          OUT="$(sudo "$HG" up "$SERVER" 2>/tmp/highgas-final.err)"
+          RC=$?
+          set -e
+          if [ "$RC" -ne 0 ]; then
+            echo '--- HIGHGAS STDERR ---'; cat /tmp/highgas-final.err || true
+            echo '--- TOR LOG ---'; sudo tail -120 "$S/tor-runtime/tor.log" 2>/dev/null || true
+            echo '--- TUN LOG ---'; sudo cat "$S/tor-runtime/tun2socks.log" 2>/dev/null || true
+            echo '--- PF ---'; sudo pfctl -a com.apple/highgas -sr 2>/dev/null || true
+            echo '--- ROUTES ---'; route -n get 1.1.1.1 2>/dev/null || true
+            exit "$RC"
+          fi
+          ELAPSED=$(( $(date +%s) - START ))
+          printf '%s\n' "$OUT"
+          printf '%s\n' "$OUT" | grep -q '^connected tor ' && ok connect-result
+          printf '%s\n' "$OUT" | grep -q " $SERVER " && ok exact-server-selected
+          test "$ELAPSED" -lt 210 && ok connect-time-bounded
+
+          STATE="$S/tor-state"
+          sudo test -s "$STATE" && ok state-file
+          IFACE="$(sudo awk -F= '$1=="IFACE"{print $2;exit}' "$STATE")"
+          PHY="$(sudo awk -F= '$1=="DEVICE"{print $2;exit}' "$STATE")"
+          TORPID="$(sudo cat "$S/tor-runtime/tor.pid")"
+          TUNPID="$(sudo cat "$S/tor-runtime/tun2socks.pid")"
+          [[ "$IFACE" =~ ^utun[0-9]+$ ]] && ok dynamic-utun-name
+          test "$PHY" = "$DEV" && ok physical-device-state
+          sudo kill -0 "$TORPID" && ok tor-process-live
+          sudo kill -0 "$TUNPID" && ok tun2socks-process-live
+          ifconfig "$IFACE" >/dev/null && ok utun-live
+          ifconfig "$IFACE" | grep -q '198.18.0.1' && ok utun-address
+
+          for probe in 1.1.1.1 2.2.2.2 4.4.4.4 8.8.8.8 16.0.0.1 32.0.0.1 64.0.0.1 128.0.0.1; do
+            route -n get "$probe" | grep -q "interface: $IFACE" || { echo "bad route $probe"; exit 31; }
+          done
+          ok all-public-route-probes-through-utun
+
+          test "$(networksetup -getdnsservers "$SERVICE")" = '127.0.0.1' && ok system-dns-local
+          sudo lsof -nP -a -p "$TORPID" -iUDP:53 >/dev/null && ok tor-dns-listener
+          dig +time=4 +tries=1 +short @127.0.0.1 lowgas.vercel.app A | grep -Eq '^[0-9]+(\.[0-9]+){3}$' && ok direct-tor-dns-query
+          dig +time=4 +tries=1 +short lowgas.vercel.app A | grep -Eq '^[0-9]+(\.[0-9]+){3}$' && ok system-dns-query
+
+          PF="$(sudo pfctl -a com.apple/highgas -sr)"
+          printf '%s\n' "$PF" | grep -q "on $PHY inet proto tcp.*user" && ok tor-only-physical-allow
+          printf '%s\n' "$PF" | grep -q "on $IFACE.*route-to ($PHY" && ok tor-utun-bypass
+          printf '%s\n' "$PF" | grep -q "block drop out quick on $PHY inet" && ok ipv4-killswitch
+          printf '%s\n' "$PF" | grep -q 'block drop out quick inet6' && ok ipv6-killswitch
+
+          # Um processo normal não pode contornar o túnel forçando a interface física.
+          if curl -4 -fsS --interface "$PHY" --connect-timeout 2 --max-time 5 https://lowgas.vercel.app/api/network-info >/tmp/leak.json 2>/dev/null; then
+            echo 'LEAK: normal user reached internet directly on physical interface'; cat /tmp/leak.json; exit 32
+          fi
+          ok normal-user-physical-egress-blocked
+
+          V="$(sudo "$HG" verify)"
+          printf '%s\n' "$V"
+          printf '%s\n' "$V" | grep -q '^IP_CHANGED=1$' && ok ip-changed
+          printf '%s\n' "$V" | grep -q '^COUNTRY_OK=1$' && ok country-ok
+          printf '%s\n' "$V" | grep -q '^DNS_OK=1$' && ok dns-ok
+          printf '%s\n' "$V" | grep -q '^IPV6_OK=1$' && ok ipv6-no-leak
+          printf '%s\n' "$V" | grep -q '^ROUTE_OK=1$' && ok route-and-killswitch-ok
+          printf '%s\n' "$V" | grep -q '^VERIFIED=1$' && ok aggregate-verified
+          VPNIP="$(printf '%s\n' "$V" | awk -F= '/^IP=/{print $2;exit}')"
+          VPNCC="$(printf '%s\n' "$V" | awk -F= '/^COUNTRY=/{print $2;exit}')"
+          test -n "$VPNIP" && ok vpn-public-ip-present
+          test "$VPNIP" != "$BASEIP" && ok vpn-ip-different-from-baseline
+          test "$VPNCC" = "$EXPECTED" && ok exact-country
+
+          ST1="$(sudo "$HG" status)"
+          sleep 2
+          ST2="$(sudo "$HG" status)"
+          printf '%s\n' "$ST1" | grep -q '^connected tor ' && ok status-connected-first
+          printf '%s\n' "$ST2" | grep -q '^connected tor ' && ok status-connected-stable
+          printf '%s\n' "$ST2" | grep -q " $SERVER " && ok status-server-stable
+
+          sudo "$HG" down | grep -q '^disconnected$' && ok disconnect-result
+          test "$(sudo "$HG" status)" = disconnected && ok status-disconnected
+          ! ifconfig "$IFACE" >/dev/null 2>&1 && ok utun-removed
+          route -n get 1.1.1.1 | grep -q "interface: $DEV" && ok direct-route-restored
+          PF_AFTER="$(sudo pfctl -a com.apple/highgas -sr 2>/dev/null || true)"
+          test -z "$PF_AFTER" && ok pf-anchor-cleared
+          ! sudo kill -0 "$TORPID" >/dev/null 2>&1 && ok tor-process-stopped
+          ! sudo kill -0 "$TUNPID" >/dev/null 2>&1 && ok tun2socks-process-stopped
+          AFTERJSON="$(curl -4 -fsS --interface "$DEV" --connect-timeout 5 --max-time 15 https://lowgas.vercel.app/api/network-info)"
+          printf '%s' "$AFTERJSON" | grep -q '"ip"' && ok internet-restored
+          DNS_AFTER="$(networksetup -getdnsservers "$SERVICE" 2>/dev/null || true)"
+          test "$DNS_AFTER" = "$DNS_BEFORE" && ok dns-restored-exactly
+
+          trap - EXIT
+          echo "FINAL_E2E_TOTAL=$N"
+          test "$N" -ge 50

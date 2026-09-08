@@ -1,113 +1,144 @@
-name: HighGAS Local Helper
+name: HighGAS Full Tunnel
 
 on:
   pull_request:
     paths:
-      - "local-helper/**"
-      - "public/highgas-local-controller.js"
-      - ".github/workflows/highgas-local-helper.yml"
+      - 'local-helper/**'
+      - 'public/highgas-local-controller.js'
+      - '.github/workflows/highgas-local-helper.yml'
   push:
     branches:
-      - highgas-direct-local-v2
+      - highgas-full-tunnel-v1
     paths:
-      - "local-helper/**"
-      - "public/highgas-local-controller.js"
-      - ".github/workflows/highgas-local-helper.yml"
+      - 'local-helper/**'
+      - 'public/highgas-local-controller.js'
+      - '.github/workflows/highgas-local-helper.yml'
   workflow_dispatch:
 
 env:
-  TOR_EXPERT_VERSION: "15.0.21"
+  TUN2SOCKS_VERSION: '2.7.0'
+  TUN2SOCKS_AMD64_SHA256: '6e654da8bab9ca1645862f0e251a69980e0966680713011feea7b1e5901b2a95'
 
 jobs:
-  build:
+  source-safety:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: '1.23.x'
           cache-dependency-path: local-helper/go.mod
-
-      - name: Validate helper
-        working-directory: local-helper
+      - name: Validate current helper and fail-closed engine
+        shell: bash
         run: |
-          go vet ./direct
-          go test ./direct
-
-      - name: Validate zsh scripts
-        run: |
-          command -v zsh >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq zsh; }
-          zsh -n local-helper/highgas-tunnel
+          set -euo pipefail
+          sudo apt-get update -qq && sudo apt-get install -y -qq zsh
+          (cd local-helper && go vet ./direct && go test ./direct)
           zsh -n local-helper/highgas-tor
+          zsh -n local-helper/highgas-tunnel
           zsh -n local-helper/install.command
           zsh -n local-helper/uninstall.command
 
-      - name: Fetch pinned WireGuard Go
-        run: git clone --depth 1 --branch 0.0.20250522 https://git.zx2c4.com/wireguard-go /tmp/wireguard-go
+          T=0
+          ok(){ T=$((T+1)); echo "SAFETY_PASS $T - $1"; }
+          has(){ grep -Fq -- "$2" "$1"; ok "$2"; }
+          lacks(){ ! grep -Fq -- "$2" "$1"; ok "sem $2"; }
 
-      - name: Fetch official Tor Expert Bundles
+          has local-helper/highgas-tor '--StrictNodes 1'
+          has local-helper/highgas-tor '--DNSPort'
+          has local-helper/highgas-tor '--ClientUseIPv6 0'
+          has local-helper/highgas-tor '--User "$PFUSER"'
+          has local-helper/highgas-tor 'block drop out quick on $dev inet all'
+          has local-helper/highgas-tor 'block drop out quick inet6 all'
+          has local-helper/highgas-tor 'pass out quick on lo0 all'
+          has local-helper/highgas-tor 'route-to ($dev $gw)'
+          has local-helper/highgas-tor 'user $PFUSER'
+          has local-helper/highgas-tor 'pf_enable_and_load "$dev" "$gw" "" yes'
+          has local-helper/highgas-tor 'pf_enable_and_load "$dev" "$gw" "$iface" no'
+          has local-helper/highgas-tor 'WG_TUN_NAME_FILE="$TUNNAME"'
+          has local-helper/highgas-tor 'for _ in {1..300}; do'
+          has local-helper/highgas-tor 'for _ in {1..12}; do'
+          has local-helper/highgas-tor 'VERIFIED=1'
+          has local-helper/highgas-tor 'IP_CHANGED='
+          has local-helper/highgas-tor 'COUNTRY_OK='
+          has local-helper/highgas-tor 'DNS_OK='
+          has local-helper/highgas-tor 'IPV6_OK='
+          has local-helper/highgas-tor 'ROUTE_OK='
+          has local-helper/highgas-tor 'a verificação completa não passou; o HighGAS desligou para evitar vazamento'
+          has local-helper/direct/main.go 'version         = "1.0.0"'
+          has local-helper/direct/main.go 'highgas-full-tunnel'
+          has local-helper/direct/main.go '420*time.Second'
+          has local-helper/install.command 'HIGHGAS_CI'
+          has local-helper/install.command 'HighGAS.webloc'
+          has public/highgas-local-controller.js 'credentials: "same-origin"'
+          has public/highgas-local-controller.js 'IP alterado'
+          has public/highgas-local-controller.js 'País correto'
+          has public/highgas-local-controller.js 'DNS protegido'
+          has public/highgas-local-controller.js 'IPv6 sem vazamento'
+          has public/highgas-local-controller.js 'Kill Switch'
+          has public/highgas-local-controller.js 'timeoutMs: 460000'
+          lacks local-helper/highgas-tor 'setsocksfirewallproxystate "$svc" on'
+          lacks local-helper/highgas-tor 'rm -rf "$DATADIR"'
+          echo "TOTAL_SOURCE_SAFETY=$T"
+          test "$T" -ge 34
+
+  native-intel-safety:
+    runs-on: macos-15-intel
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - name: Native Intel PF, dynamic utun and route primitives
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p /tmp/tor-expert/intel /tmp/tor-expert/apple-silicon
-          curl --fail --location --retry 3 --retry-delay 2 \
-            "https://archive.torproject.org/tor-package-archive/torbrowser/${TOR_EXPERT_VERSION}/tor-expert-bundle-macos-x86_64-${TOR_EXPERT_VERSION}.tar.gz" \
-            -o /tmp/tor-intel.tar.gz
-          curl --fail --location --retry 3 --retry-delay 2 \
-            "https://archive.torproject.org/tor-package-archive/torbrowser/${TOR_EXPERT_VERSION}/tor-expert-bundle-macos-aarch64-${TOR_EXPERT_VERSION}.tar.gz" \
-            -o /tmp/tor-apple-silicon.tar.gz
-          tar -xzf /tmp/tor-intel.tar.gz -C /tmp/tor-expert/intel
-          tar -xzf /tmp/tor-apple-silicon.tar.gz -C /tmp/tor-expert/apple-silicon
-          test -x /tmp/tor-expert/intel/tor/tor
-          test -f /tmp/tor-expert/intel/data/geoip
-          test -f /tmp/tor-expert/intel/data/geoip6
-          test -x /tmp/tor-expert/apple-silicon/tor/tor
-          test -f /tmp/tor-expert/apple-silicon/data/geoip
-          test -f /tmp/tor-expert/apple-silicon/data/geoip6
-          file /tmp/tor-expert/intel/tor/tor | tee /tmp/tor-intel-file.txt
-          file /tmp/tor-expert/apple-silicon/tor/tor | tee /tmp/tor-arm-file.txt
-          grep -Eqi 'x86_64|x86-64' /tmp/tor-intel-file.txt
-          grep -Eqi 'arm64|aarch64' /tmp/tor-arm-file.txt
+          test "$(uname -m)" = x86_64
+          sysctl -n machdep.cpu.brand_string
+          zsh -n local-helper/highgas-tor
+          command -v /sbin/pfctl
+          command -v /sbin/route
+          command -v /sbin/ifconfig
+          command -v /usr/sbin/networksetup
+          id _www
 
-      - name: Build macOS packages
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p local-helper/dist/intel local-helper/dist/apple-silicon
-          for spec in 'intel amd64' 'apple-silicon arm64'; do
-            set -- $spec
-            out="$1"
-            arch="$2"
-            (cd local-helper && CGO_ENABLED=0 GOOS=darwin GOARCH="$arch" go build -trimpath -ldflags='-s -w' -o "dist/$out/highgas-helper" ./direct)
-            (cd /tmp/wireguard-go && CGO_ENABLED=0 GOOS=darwin GOARCH="$arch" go build -trimpath -ldflags='-s -w' -o "$GITHUB_WORKSPACE/local-helper/dist/$out/wireguard-go" .)
-            cp local-helper/highgas-tunnel local-helper/highgas-tor local-helper/install.command local-helper/uninstall.command local-helper/TOR-NOTICE.txt public/highgas-local-controller.js "local-helper/dist/$out/"
-            mkdir -p "local-helper/dist/$out/tor-expert"
-            cp -R "/tmp/tor-expert/$out/." "local-helper/dist/$out/tor-expert/"
-            chmod +x "local-helper/dist/$out/"{highgas-helper,wireguard-go,highgas-tunnel,highgas-tor,install.command,uninstall.command}
-            chmod +x "local-helper/dist/$out/tor-expert/tor/tor"
+          cat >/tmp/highgas-pf-test.conf <<'EOF'
+          pass out quick on lo0 all
+          pass out quick on en0 inet proto tcp user _www keep state
+          pass out quick on utun4 route-to (en0 192.0.2.1) inet proto tcp user _www keep state
+          block drop out quick on en0 inet all
+          block drop out quick inet6 all
+          EOF
+          sudo /sbin/pfctl -nf /tmp/highgas-pf-test.conf
+
+          curl --fail --location --retry 3 \
+            "https://github.com/xjasonlyu/tun2socks/releases/download/v${TUN2SOCKS_VERSION}/tun2socks-darwin-amd64.zip" \
+            -o /tmp/tun2socks.zip
+          echo "${TUN2SOCKS_AMD64_SHA256}  /tmp/tun2socks.zip" | shasum -a 256 -c -
+          rm -rf /tmp/t2s && mkdir -p /tmp/t2s
+          unzip -q /tmp/tun2socks.zip -d /tmp/t2s
+          TUN="$(find /tmp/t2s -type f -name 'tun2socks*' ! -name '*.zip' ! -name '*LICENSE*' -print -quit)"
+          chmod +x "$TUN"
+          file "$TUN" | grep -Eqi 'x86_64|x86-64'
+
+          NAME=/tmp/highgas-native-utun.name
+          rm -f "$NAME"
+          sudo /usr/bin/env WG_TUN_NAME_FILE="$NAME" "$TUN" --device utun --proxy socks5://127.0.0.1:9 --loglevel error >/tmp/t2s.log 2>&1 &
+          PID=$!
+          cleanup(){
+            sudo kill "$PID" >/dev/null 2>&1 || true
+            [ -n "${IFACE:-}" ] && sudo /sbin/route -q -n delete -inet 203.0.113.0/24 -interface "$IFACE" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          for i in {1..50}; do
+            test -s "$NAME" && break
+            sudo kill -0 "$PID" 2>/dev/null || { cat /tmp/t2s.log; exit 1; }
+            sleep .2
           done
-
-      - name: Validate package shape
-        run: |
-          grep -q '^#!/bin/zsh' local-helper/highgas-tunnel
-          grep -q '^#!/bin/zsh' local-helper/highgas-tor
-          grep -q 'HighGAS.webloc' local-helper/install.command
-          grep -q 'LOCAL_HOST' local-helper/dist/intel/highgas-local-controller.js
-          grep -q 'credentials: "same-origin"' local-helper/dist/intel/highgas-local-controller.js
-          test -x local-helper/dist/intel/tor-expert/tor/tor
-          test -f local-helper/dist/intel/tor-expert/data/geoip
-          test -x local-helper/dist/apple-silicon/tor-expert/tor/tor
-          test -f local-helper/dist/apple-silicon/tor-expert/data/geoip
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: HighGAS-Direct-Tor-macOS-Intel
-          path: local-helper/dist/intel/
-          if-no-files-found: error
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: HighGAS-Direct-Tor-macOS-Apple-Silicon
-          path: local-helper/dist/apple-silicon/
-          if-no-files-found: error
+          test -s "$NAME"
+          IFACE="$(cat "$NAME" | tr -d '\r\n')"
+          [[ "$IFACE" =~ ^utun[0-9]+$ ]]
+          /sbin/ifconfig "$IFACE" >/dev/null
+          sudo /sbin/ifconfig "$IFACE" inet 198.18.0.1 198.18.0.1 up
+          sudo /sbin/route -q -n add -inet 203.0.113.0/24 -interface "$IFACE"
+          /sbin/route -n get 203.0.113.1 | grep -q "interface: $IFACE"
+          echo "NATIVE_INTEL_PRIMITIVES=PASS iface=$IFACE"

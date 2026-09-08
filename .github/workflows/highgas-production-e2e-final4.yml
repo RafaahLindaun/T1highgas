@@ -1,0 +1,129 @@
+name: HighGAS Production E2E Final 4
+
+on:
+  push:
+    branches: [highgas-full-tunnel-v1]
+    paths: [".github/workflows/highgas-production-e2e-final4.yml"]
+
+env:
+  TOR_EXPERT_VERSION: "15.0.21"
+  TUN2SOCKS_VERSION: "2.7.0"
+  TUN2SOCKS_AMD64_SHA256: "6e654da8bab9ca1645862f0e251a69980e0966680713011feea7b1e5901b2a95"
+
+jobs:
+  exact-lifecycle:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - server: de-fra-01
+            country: DE
+          - server: us-mia-01
+            country: US
+    runs-on: macos-15-intel
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install exact engine under system path
+        shell: bash
+        run: |
+          set -euo pipefail
+          S="/Library/Application Support/HighGAS"
+          curl -fL --retry 3 "https://archive.torproject.org/tor-package-archive/torbrowser/${TOR_EXPERT_VERSION}/tor-expert-bundle-macos-x86_64-${TOR_EXPERT_VERSION}.tar.gz" -o /tmp/tor.tgz
+          curl -fL --retry 3 "https://github.com/xjasonlyu/tun2socks/releases/download/v${TUN2SOCKS_VERSION}/tun2socks-darwin-amd64.zip" -o /tmp/t2s.zip
+          echo "${TUN2SOCKS_AMD64_SHA256}  /tmp/t2s.zip" | shasum -a 256 -c -
+          rm -rf /tmp/torx /tmp/t2sx && mkdir /tmp/torx /tmp/t2sx
+          tar -xzf /tmp/tor.tgz -C /tmp/torx
+          unzip -q /tmp/t2s.zip -d /tmp/t2sx
+          TUN="$(find /tmp/t2sx -type f -name 'tun2socks*' ! -name '*.zip' ! -name '*LICENSE*' -print -quit)"
+          sudo mkdir -p "$S"
+          sudo rm -rf "$S/tor-expert" "$S/tor-runtime" "$S/tor-state"
+          sudo cp -R /tmp/torx "$S/tor-expert"
+          sudo cp "$TUN" "$S/tun2socks"
+          sudo cp local-helper/highgas-tor "$S/highgas-tor"
+          sudo chown -R root:wheel "$S"
+          sudo chmod 711 "$S"
+          sudo find "$S/tor-expert" -type d -exec chmod 755 {} +
+          sudo find "$S/tor-expert" -type f -exec chmod 644 {} +
+          sudo chmod 755 "$S/highgas-tor" "$S/tun2socks" "$S/tor-expert/tor/tor"
+          zsh -n "$S/highgas-tor"
+          grep -Fq 'pass out quick route-to ($dev $gw)' "$S/highgas-tor"
+          grep -Fq 'WG_TUN_NAME_FILE="$TUNNAME"' "$S/highgas-tor"
+
+      - name: Prove final product end to end
+        shell: bash
+        env:
+          SERVER: ${{ matrix.server }}
+          EXPECTED: ${{ matrix.country }}
+        run: |
+          set -euo pipefail
+          S="/Library/Application Support/HighGAS"; HG="$S/highgas-tor"; N=0
+          ok(){ N=$((N+1)); echo "FINAL4_PASS $N - $1"; }
+          trap 'sudo "$HG" down >/dev/null 2>&1 || true' EXIT
+
+          test "$(uname -m)" = x86_64 && ok intel
+          id _www >/dev/null && ok tor-user
+          sudo -u _www test -r "$S/tor-expert/data/geoip" && ok geoip
+          sudo -u _www test -r "$S/tor-expert/data/geoip6" && ok geoip6
+          sudo test -x "$HG" && ok engine
+          sudo test -x "$S/tun2socks" && ok tun2socks
+          sudo test -x "$S/tor-expert/tor/tor" && ok tor
+          RI="$(route -n get default)"; DEV="$(printf '%s\n' "$RI"|awk '/interface:/{print $2;exit}')"; GW="$(printf '%s\n' "$RI"|awk '/gateway:/{print $2;exit}')"
+          test -n "$DEV" && ok physical-device
+          test -n "$GW" && ok gateway
+          BASE="$(curl -4 -fsS --interface "$DEV" --max-time 15 https://lowgas.vercel.app/api/network-info)"
+          BASEIP="$(printf '%s' "$BASE"|sed -n 's/.*"ip"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+          test -n "$BASEIP" && ok baseline-ip
+
+          set +e; OUT="$(sudo "$HG" up "$SERVER" 2>/tmp/hg.err)"; RC=$?; set -e
+          if [ "$RC" -ne 0 ]; then
+            cat /tmp/hg.err || true
+            echo '--- TUN ---'; sudo cat "$S/tor-runtime/tun2socks.log" 2>/dev/null || true
+            echo '--- TOR ---'; sudo tail -100 "$S/tor-runtime/tor.log" 2>/dev/null || true
+            exit "$RC"
+          fi
+          printf '%s\n' "$OUT"
+          printf '%s\n' "$OUT"|grep -q '^connected tor ' && ok connect-result
+          printf '%s\n' "$OUT"|grep -q " $SERVER " && ok selected-server
+          sudo test -s "$S/tor-state" && ok state
+          IFACE="$(sudo awk -F= '$1=="IFACE"{print $2;exit}' "$S/tor-state")"
+          SERVICE="$(sudo awk -F= '$1=="SERVICE"{print $2;exit}' "$S/tor-state")"
+          PHY="$(sudo awk -F= '$1=="DEVICE"{print $2;exit}' "$S/tor-state")"
+          [[ "$IFACE" =~ ^utun[0-9]+$ ]] && ok dynamic-utun
+          ifconfig "$IFACE" >/dev/null && ok utun-live
+          ifconfig "$IFACE"|grep -q 198.18.0.1 && ok utun-ip
+          route -n get 1.1.1.1|grep -q "interface: $IFACE" && ok default-public-route-tunneled
+          TP="$(sudo cat "$S/tor-runtime/tun2socks.pid")"; RP="$(sudo cat "$S/tor-runtime/tor.pid")"
+          sudo kill -0 "$TP" && ok tun-process
+          sudo kill -0 "$RP" && ok tor-process
+          test "$(networksetup -getdnsservers "$SERVICE")" = 127.0.0.1 && ok dns-setting
+          sudo lsof -nP -a -p "$RP" -iUDP:53 >/dev/null && ok dns-listener
+          dig +time=3 +tries=1 +short @127.0.0.1 lowgas.vercel.app A|grep -Eq '^[0-9]+(\.[0-9]+){3}$' && ok dns-resolution
+          PF="$(sudo pfctl -a com.apple/highgas -sr)"
+          printf '%s\n' "$PF"|grep -q "route-to ($PHY" && ok tor-route-to-physical
+          printf '%s\n' "$PF"|grep -q "block drop out quick on $PHY inet" && ok ipv4-killswitch
+          printf '%s\n' "$PF"|grep -q 'block drop out quick inet6' && ok ipv6-killswitch
+
+          V="$(sudo "$HG" verify)"; printf '%s\n' "$V"
+          printf '%s\n' "$V"|grep -q '^IP_CHANGED=1$' && ok ip-changed
+          printf '%s\n' "$V"|grep -q '^COUNTRY_OK=1$' && ok country-ok
+          printf '%s\n' "$V"|grep -q '^DNS_OK=1$' && ok dns-ok
+          printf '%s\n' "$V"|grep -q '^IPV6_OK=1$' && ok ipv6-ok
+          printf '%s\n' "$V"|grep -q '^ROUTE_OK=1$' && ok route-ok
+          printf '%s\n' "$V"|grep -q '^VERIFIED=1$' && ok verified
+          VIP="$(printf '%s\n' "$V"|awk -F= '/^IP=/{print $2;exit}')"; CC="$(printf '%s\n' "$V"|awk -F= '/^COUNTRY=/{print $2;exit}')"
+          test -n "$VIP" && ok vpn-ip
+          test "$VIP" != "$BASEIP" && ok vpn-ip-different
+          test "$CC" = "$EXPECTED" && ok exact-country
+          ST="$(sudo "$HG" status)"; printf '%s\n' "$ST"|grep -q '^connected tor ' && ok status-connected
+          printf '%s\n' "$ST"|grep -q " $SERVER " && ok status-server
+
+          sudo "$HG" down|grep -q '^disconnected$' && ok disconnect
+          test "$(sudo "$HG" status)" = disconnected && ok disconnected-status
+          ! ifconfig "$IFACE" >/dev/null 2>&1 && ok utun-gone
+          route -n get 1.1.1.1|grep -q "interface: $DEV" && ok route-restored
+          AFTER="$(curl -4 -fsS --interface "$DEV" --max-time 15 https://lowgas.vercel.app/api/network-info)"
+          printf '%s' "$AFTER"|grep -q '"ip"' && ok internet-restored
+          trap - EXIT
+          echo "FINAL4_TOTAL=$N"
+          test "$N" -ge 40

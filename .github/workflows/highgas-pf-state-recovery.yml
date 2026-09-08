@@ -1,0 +1,75 @@
+name: HighGAS PF State Recovery Diagnostic
+
+on:
+  push:
+    branches: [highgas-full-tunnel-v1]
+    paths: [".github/workflows/highgas-pf-state-recovery.yml"]
+
+env:
+  TOR_EXPERT_VERSION: "15.0.21"
+  TUN2SOCKS_VERSION: "2.7.0"
+
+jobs:
+  recovery:
+    strategy:
+      fail-fast: false
+      matrix:
+        flush: [no, yes]
+    runs-on: macos-15-intel
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test Tor PF recovery and full routes
+        shell: bash
+        env:
+          DO_FLUSH: ${{ matrix.flush }}
+        run: |
+          set -euo pipefail
+          curl -fL --retry 3 "https://archive.torproject.org/tor-package-archive/torbrowser/${TOR_EXPERT_VERSION}/tor-expert-bundle-macos-x86_64-${TOR_EXPERT_VERSION}.tar.gz" -o /tmp/tor.tgz
+          curl -fL --retry 3 "https://github.com/xjasonlyu/tun2socks/releases/download/v${TUN2SOCKS_VERSION}/tun2socks-darwin-amd64.zip" -o /tmp/t2s.zip
+          rm -rf /tmp/hgr && mkdir -p /tmp/hgr/tor /tmp/hgr/t2s /tmp/hgr/data
+          tar -xzf /tmp/tor.tgz -C /tmp/hgr/tor; unzip -q /tmp/t2s.zip -d /tmp/hgr/t2s; chmod -R a+rX /tmp/hgr/tor
+          TOR=/tmp/hgr/tor/tor/tor; GEO=/tmp/hgr/tor/data/geoip; GEO6=/tmp/hgr/tor/data/geoip6
+          TUN="$(find /tmp/hgr/t2s -type f -name 'tun2socks*' ! -name '*.zip' ! -name '*LICENSE*' -print -quit)"; chmod +x "$TUN"; sudo chown _www /tmp/hgr/data
+          RI="$(route -n get default)"; DEV="$(printf '%s\n' "$RI"|awk '/interface:/{print $2;exit}')"; GW="$(printf '%s\n' "$RI"|awk '/gateway:/{print $2;exit}')"
+          ROUTES=(1.0.0.0/8 2.0.0.0/7 4.0.0.0/6 8.0.0.0/5 16.0.0.0/4 32.0.0.0/3 64.0.0.0/2 128.0.0.0/1)
+          IFACE=""; TP=""; RP=""
+          cleanup(){ set +e; for r in "${ROUTES[@]}"; do [ -n "$IFACE" ] && sudo route -q -n delete -inet "$r" -interface "$IFACE" >/dev/null 2>&1; done; sudo pfctl -a com.apple/highgasrecovery -F all >/dev/null 2>&1; [ -n "$TP" ]&&sudo kill "$TP" >/dev/null 2>&1; [ -n "$RP" ]&&sudo kill "$RP" >/dev/null 2>&1; }
+          trap cleanup EXIT
+          sudo "$TOR" --User _www --ClientOnly 1 --RunAsDaemon 1 --AvoidDiskWrites 1 --ClientUseIPv6 0 --SocksPort 127.0.0.1:39050 --DNSPort 127.0.0.1:39053 --DataDirectory /tmp/hgr/data --GeoIPFile "$GEO" --GeoIPv6File "$GEO6" --ExitNodes '{de}' --StrictNodes 1 --PidFile /tmp/hgr/data/tor.pid --Log 'notice file /tmp/hgr/data/tor.log'
+          for i in $(seq 1 150); do sudo grep -q 'Bootstrapped 100%' /tmp/hgr/data/tor.log 2>/dev/null&&break; sleep 1; done
+          sudo grep -q 'Bootstrapped 100%' /tmp/hgr/data/tor.log; RP="$(sudo cat /tmp/hgr/data/tor.pid)"
+          curl -4 -fsS --socks5-hostname 127.0.0.1:39050 --max-time 30 https://lowgas.vercel.app/api/network-info|grep -q '"country":"DE"'
+          echo BASE_TOR_OK
+
+          NAME=/tmp/hgr/name; sudo /usr/bin/env WG_TUN_NAME_FILE="$NAME" "$TUN" --device utun --proxy socks5://127.0.0.1:39050 --loglevel error >/tmp/hgr/t2s.log 2>&1 & TP=$!
+          for i in $(seq 1 50); do test -s "$NAME"&&break; sleep .2; done; IFACE="$(sudo cat "$NAME"|tr -d '\r\n')"; sudo ifconfig "$IFACE" inet 198.18.0.1 198.18.0.1 up
+          cat >/tmp/hgr/pf.conf <<EOF
+          pass out quick on lo0 all
+          pass out quick on $DEV inet proto tcp user _www keep state
+          pass out quick on $IFACE route-to ($DEV $GW) inet proto tcp user _www keep state
+          block drop out quick on $DEV inet all
+          block drop out quick inet6 all
+          EOF
+          sudo pfctl -nf /tmp/hgr/pf.conf; sudo pfctl -E >/dev/null 2>&1||true; sudo pfctl -a com.apple/highgasrecovery -f /tmp/hgr/pf.conf
+          if [ "$DO_FLUSH" = yes ]; then sudo pfctl -F states; echo STATES_FLUSHED; else echo STATES_PRESERVED; fi
+
+          REC=0
+          for i in $(seq 1 90); do
+            if curl -4 -fsS --socks5-hostname 127.0.0.1:39050 --connect-timeout 3 --max-time 7 https://lowgas.vercel.app/api/network-info >/tmp/pf.json 2>/dev/null; then REC=1; echo "PF_RECOVERED_AT=$i"; cat /tmp/pf.json; break; fi
+            sleep 1
+          done
+          [ "$REC" -eq 1 ] || { echo PF_DID_NOT_RECOVER; sudo pfctl -ss||true; sudo lsof -nP -a -p "$RP" -iTCP||true; sudo tail -100 /tmp/hgr/data/tor.log||true; exit 51; }
+
+          for r in "${ROUTES[@]}"; do sudo route -q -n add -inet "$r" -interface "$IFACE"; done
+          echo FULL_ROUTES_ON
+          REC2=0
+          for i in $(seq 1 60); do
+            if curl -4 -fsS --socks5-hostname 127.0.0.1:39050 --connect-timeout 3 --max-time 7 https://lowgas.vercel.app/api/network-info >/tmp/full.json 2>/dev/null; then REC2=1; echo "FULL_RECOVERED_AT=$i"; cat /tmp/full.json; break; fi
+            sleep 1
+          done
+          [ "$REC2" -eq 1 ] || { echo FULL_DID_NOT_RECOVER; sudo pfctl -vvsr||true; sudo pfctl -ss||true; sudo lsof -nP -a -p "$RP" -iTCP||true; sudo tail -100 /tmp/hgr/data/tor.log||true; exit 52; }
+          grep -q '"country":"DE"' /tmp/full.json
+          dig +time=3 +tries=1 +short @127.0.0.1 -p 39053 lowgas.vercel.app A|grep -Eq '^[0-9]+(\.[0-9]+){3}$'
+          echo "RECOVERY_DIAGNOSTIC_OK flush=$DO_FLUSH"
+          trap - EXIT; cleanup

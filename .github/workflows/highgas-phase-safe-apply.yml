@@ -1,0 +1,53 @@
+name: HighGAS Phase Safe Apply
+
+on:
+  push:
+    branches: [highgas-full-tunnel-v1]
+    paths:
+      - '.github/workflows/highgas-phase-safe-apply.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: highgas-full-tunnel-v1
+      - name: Apply corrected two-phase PF engine
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          source = Path('.github/workflows/highgas-phase-safe-fix.yml').read_text()
+          marker = "          python3 - <<'PY'\n"
+          if marker not in source:
+              raise SystemExit('source patch block not found')
+          block = source.split(marker, 1)[1].split("\n          PY\n", 1)[0]
+          lines = []
+          for line in block.splitlines():
+              lines.append(line[10:] if line.startswith('          ') else line)
+          code = '\n'.join(lines)
+          code = code.replace("new_pf + '\\\\n\\\\ndns_probe()'", "lambda _m: new_pf + '\\\\n\\\\ndns_probe()'")
+          code = code.replace("new_up + '\\\\n\\\\nstatus()'", "lambda _m: new_up + '\\\\n\\\\nstatus()'")
+          # Handle the literal representation used by the workflow after YAML parsing.
+          code = code.replace("new_pf + '\\n\\ndns_probe()'", "lambda _m: new_pf + '\\n\\ndns_probe()'")
+          code = code.replace("new_up + '\\n\\nstatus()'", "lambda _m: new_up + '\\n\\nstatus()'")
+          exec(compile(code, '<highgas-phase-safe-patch>', 'exec'), {})
+          PY
+
+          zsh -n local-helper/highgas-tor
+          grep -Fq 'pf_enable_and_load "$dev" "$gw" "" yes' local-helper/highgas-tor
+          grep -Fq 'pf_enable_and_load "$dev" "$gw" "$iface" no' local-helper/highgas-tor
+          grep -Fq 'ANTES do Tor existir' local-helper/highgas-tor
+          grep -Fq 'Os únicos states diretos' local-helper/highgas-tor
+          git diff --check
+          git config user.name 'HighGAS CI'
+          git config user.email '89591381+RafaahLindaun@users.noreply.github.com'
+          git add local-helper/highgas-tor
+          git commit -m 'HighGAS: ativar kill switch antes do Tor sem destruir circuito'
+          git push origin HEAD:highgas-full-tunnel-v1

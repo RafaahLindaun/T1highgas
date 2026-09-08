@@ -1,0 +1,40 @@
+name: HighGAS One Shot Runner Fix
+
+on:
+  push:
+    branches: [highgas-full-tunnel-v1]
+    paths: [".github/workflows/highgas-one-shot-runner-fix.yml"]
+
+permissions:
+  contents: write
+
+jobs:
+  patch-runner:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: highgas-full-tunnel-v1
+      - name: Replace retired macOS runner label
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('.github/workflows/highgas-local-helper.yml')
+          s = p.read_text()
+          old = s
+          s = s.replace('    runs-on: macos-13\n', '    runs-on: macos-15-intel\n')
+          if s == old:
+              raise SystemExit('macos-13 runner label not found')
+          if 'runs-on: macos-13' in s:
+              raise SystemExit('retired runner label remains')
+          p.write_text(s)
+          PY
+          git diff --check
+          grep -q 'runs-on: macos-15-intel' .github/workflows/highgas-local-helper.yml
+          git config user.name 'HighGAS CI'
+          git config user.email '89591381+RafaahLindaun@users.noreply.github.com'
+          git add .github/workflows/highgas-local-helper.yml
+          git commit -m 'HighGAS: usar runner macOS Intel disponível na validação'
+          git push origin HEAD:highgas-full-tunnel-v1

@@ -1,0 +1,58 @@
+name: HighGAS Tor Runtime Debug
+
+on:
+  push:
+    branches: [highgas-full-tunnel-v1]
+    paths: [".github/workflows/highgas-tor-debug.yml"]
+  workflow_dispatch:
+
+env:
+  TOR_EXPERT_VERSION: "15.0.21"
+
+jobs:
+  tor-intel:
+    runs-on: macos-15-intel
+    timeout-minutes: 8
+    steps:
+      - name: Diagnose Tor bootstrap as _www
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fL --retry 3 "https://archive.torproject.org/tor-package-archive/torbrowser/${TOR_EXPERT_VERSION}/tor-expert-bundle-macos-x86_64-${TOR_EXPERT_VERSION}.tar.gz" -o /tmp/tor.tgz
+          rm -rf /tmp/hgdbg && mkdir -p /tmp/hgdbg/bundle /tmp/hgdbg/de
+          tar -xzf /tmp/tor.tgz -C /tmp/hgdbg/bundle
+          chmod -R a+rX /tmp/hgdbg/bundle
+          TOR=/tmp/hgdbg/bundle/tor/tor
+          GEO=/tmp/hgdbg/bundle/data/geoip
+          GEO6=/tmp/hgdbg/bundle/data/geoip6
+          sudo chown _www /tmp/hgdbg/de
+          sudo -u _www test -r "$GEO"
+          sudo -u _www test -r "$GEO6"
+          set +e
+          sudo "$TOR" --User _www --ClientOnly 1 --RunAsDaemon 1 --AvoidDiskWrites 1 --ClientUseIPv6 0 --SocksPort 127.0.0.1:39150 --DNSPort 127.0.0.1:53 --DataDirectory /tmp/hgdbg/de --GeoIPFile "$GEO" --GeoIPv6File "$GEO6" --ExitNodes '{de}' --StrictNodes 1 --PidFile /tmp/hgdbg/de/tor.pid --Log 'notice file /tmp/hgdbg/de/tor.log' >/tmp/tor-start.log 2>&1
+          RC=$?
+          set -e
+          echo "start_rc=$RC"
+          cat /tmp/tor-start.log || true
+          for i in $(seq 1 90); do
+            if sudo grep -q 'Bootstrapped 100%' /tmp/hgdbg/de/tor.log 2>/dev/null; then echo BOOTSTRAP_OK; break; fi
+            if test -s /tmp/hgdbg/de/tor.pid; then
+              P="$(sudo cat /tmp/hgdbg/de/tor.pid)"
+              if ! sudo kill -0 "$P" 2>/dev/null; then echo TOR_DIED; break; fi
+            fi
+            sleep 1
+          done
+          echo '--- tor.log ---'
+          sudo tail -80 /tmp/hgdbg/de/tor.log 2>/dev/null || true
+          echo '--- listeners ---'
+          sudo lsof -nP -iTCP:39150 -iUDP:53 || true
+          test "$RC" -eq 0
+          sudo grep -q 'Bootstrapped 100%' /tmp/hgdbg/de/tor.log
+          P="$(sudo cat /tmp/hgdbg/de/tor.pid)"
+          sudo kill -0 "$P"
+          sudo lsof -nP -a -p "$P" -iTCP:39150 -sTCP:LISTEN >/dev/null
+          sudo lsof -nP -a -p "$P" -iUDP:53 >/dev/null
+          /usr/bin/dig +time=3 +tries=1 +short @127.0.0.1 -p 53 lowgas.vercel.app A | grep -E '^[0-9]+(\.[0-9]+){3}$'
+          curl -4 -fsS --socks5-hostname 127.0.0.1:39150 --connect-timeout 10 --max-time 30 https://lowgas.vercel.app/api/network-info | tee /tmp/out.json
+          grep -Eq '"country"[[:space:]]*:[[:space:]]*"DE"' /tmp/out.json
+          sudo kill "$P" || true

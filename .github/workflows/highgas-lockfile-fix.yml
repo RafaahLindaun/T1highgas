@@ -1,0 +1,36 @@
+name: HighGAS Lockfile Fix
+
+on:
+  push:
+    branches: [highgas-full-tunnel-v1]
+    paths:
+      - '.github/workflows/highgas-lockfile-fix.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: highgas-full-tunnel-v1
+      - name: Synchronize npm lockfile and prove UI build
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+          npm ci --no-audit --no-fund
+          npm run build
+          test -f dist/index.html
+          grep -Rqs 'Full Tunnel integrado' dist
+          grep -Rqs 'Estados Unidos' dist
+          grep -Rqs 'Alemanha' dist
+          ! grep -Rqs 'Importe seu perfil WireGuard uma vez' dist
+          git diff --check
+          git config user.name 'HighGAS CI'
+          git config user.email '89591381+RafaahLindaun@users.noreply.github.com'
+          git add package-lock.json
+          git commit -m 'HighGAS: sincronizar package-lock da interface final'
+          git push origin HEAD:highgas-full-tunnel-v1

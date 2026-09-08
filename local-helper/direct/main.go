@@ -21,7 +21,7 @@ import (
 )
 
 const (
-	version         = "0.7.0"
+	version         = "1.0.0"
 	addr            = "127.0.0.1:37654"
 	base            = "/Library/Application Support/HighGAS"
 	profiles        = base + "/profiles"
@@ -141,7 +141,7 @@ func main() {
 		Handler:           a.securityHeaders(mux),
 		ReadHeaderTimeout: 3 * time.Second,
 		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      180 * time.Second,
+		WriteTimeout:      450 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
 	if err := s.ListenAndServeTLS(certFile, keyFile); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -292,7 +292,7 @@ func (a *app) health(w http.ResponseWriter, r *http.Request) {
 		"helper":          true,
 		"version":         version,
 		"transport":       "https-local-cookie",
-		"engine":          "tor+wireguard-go",
+		"engine":          "highgas-full-tunnel",
 		"engineReady":     te == nil && we == nil,
 		"torReady":        torAvailable(),
 		"controllerReady": ce == nil,
@@ -390,7 +390,7 @@ func (a *app) connect(w http.ResponseWriter, r *http.Request) {
 		a.mu.Lock()
 		defer a.mu.Unlock()
 		_ = exec.Command(tunnel, "down").Run()
-		ctx, cancel := context.WithTimeout(context.Background(), 165*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 420*time.Second)
 		defer cancel()
 		b, err := exec.CommandContext(ctx, torctl, "up", q.Server).CombinedOutput()
 		if ctx.Err() != nil {

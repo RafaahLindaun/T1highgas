@@ -1,0 +1,225 @@
+name: HighGAS Final Intel Package
+
+on:
+  push:
+    branches: [highgas-full-tunnel-v1]
+    paths:
+      - '.github/workflows/highgas-final-package.yml'
+      - 'src/**'
+      - 'public/highgas-local-controller.js'
+      - 'local-helper/**'
+      - 'package.json'
+      - 'package-lock.json'
+
+permissions:
+  contents: read
+
+env:
+  TOR_EXPERT_VERSION: '15.0.21'
+  TUN2SOCKS_VERSION: '2.7.0'
+  TUN2SOCKS_AMD64_SHA256: '6e654da8bab9ca1645862f0e251a69980e0966680713011feea7b1e5901b2a95'
+
+jobs:
+  final-package:
+    runs-on: macos-15-intel
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23.x'
+          cache-dependency-path: local-helper/go.mod
+
+      - name: Validate web UI and helper source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          npm ci
+          npm run build
+          test -f dist/index.html
+          grep -Rqs 'Full Tunnel integrado' dist
+          grep -Rqs 'Estados Unidos' dist
+          grep -Rqs 'Alemanha' dist
+          ! grep -Rqs 'Importe seu perfil WireGuard uma vez' dist
+          (cd local-helper && go vet ./direct && go test ./direct)
+          zsh -n local-helper/highgas-tor
+          zsh -n local-helper/highgas-tunnel
+          zsh -n local-helper/install.command
+          zsh -n local-helper/uninstall.command
+          grep -Fq 'version         = "1.0.0"' local-helper/direct/main.go
+          grep -Fq 'for _ in {1..12}; do' local-helper/highgas-tor
+          grep -Fq 'pf_enable_and_load "$dev" "$gw" "" yes' local-helper/highgas-tor
+          grep -Fq 'pf_enable_and_load "$dev" "$gw" "$iface" no' local-helper/highgas-tor
+
+      - name: Build exact Intel package
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$RUNNER_TEMP/HighGAS-Final-macOS-Intel"
+          rm -rf "$OUT" /tmp/wireguard-go /tmp/highgas-tor /tmp/highgas-t2s
+          mkdir -p "$OUT" /tmp/highgas-tor /tmp/highgas-t2s
+
+          (cd local-helper && CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o "$OUT/highgas-helper" ./direct)
+          git clone --depth 1 --branch 0.0.20250522 https://git.zx2c4.com/wireguard-go /tmp/wireguard-go
+          (cd /tmp/wireguard-go && CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o "$OUT/wireguard-go" .)
+
+          curl -fL --retry 3 --retry-delay 2 \
+            "https://archive.torproject.org/tor-package-archive/torbrowser/${TOR_EXPERT_VERSION}/tor-expert-bundle-macos-x86_64-${TOR_EXPERT_VERSION}.tar.gz" \
+            -o /tmp/highgas-tor.tgz
+          tar -xzf /tmp/highgas-tor.tgz -C /tmp/highgas-tor
+          test -x /tmp/highgas-tor/tor/tor
+          test -f /tmp/highgas-tor/data/geoip
+          test -f /tmp/highgas-tor/data/geoip6
+
+          curl -fL --retry 3 --retry-delay 2 \
+            "https://github.com/xjasonlyu/tun2socks/releases/download/v${TUN2SOCKS_VERSION}/tun2socks-darwin-amd64.zip" \
+            -o /tmp/highgas-t2s.zip
+          echo "${TUN2SOCKS_AMD64_SHA256}  /tmp/highgas-t2s.zip" | shasum -a 256 -c -
+          unzip -q /tmp/highgas-t2s.zip -d /tmp/highgas-t2s
+          TUN="$(find /tmp/highgas-t2s -type f -name 'tun2socks*' ! -name '*.zip' ! -name '*LICENSE*' -print -quit)"
+          test -n "$TUN" && test -f "$TUN"
+
+          cp "$TUN" "$OUT/tun2socks"
+          cp local-helper/highgas-tunnel local-helper/highgas-tor local-helper/install.command local-helper/uninstall.command "$OUT/"
+          cp local-helper/TOR-NOTICE.txt local-helper/TUN2SOCKS-NOTICE.txt "$OUT/"
+          cp public/highgas-local-controller.js "$OUT/"
+          cp -R /tmp/highgas-tor "$OUT/tor-expert"
+          chmod +x "$OUT/"{highgas-helper,wireguard-go,tun2socks,highgas-tunnel,highgas-tor,install.command,uninstall.command}
+          chmod +x "$OUT/tor-expert/tor/tor"
+
+          cat > "$OUT/LEIA-ME.txt" <<'TXT'
+          HighGAS Final — macOS Intel
+
+          1. Dê dois cliques em install.command.
+          2. Digite a senha administrativa do Mac quando solicitado.
+          3. O atalho HighGAS será criado na Mesa e a tela local abrirá.
+          4. Escolha Alemanha ou Estados Unidos e toque em LIGAR VPN.
+          5. Para encerrar, toque em DESLIGAR VPN.
+
+          Não é necessário importar .conf, abrir WireGuard ou assinar um serviço.
+          Enquanto ligado: TCP IPv4 e DNS usam o Full Tunnel; IPv6 e UDP são bloqueados para evitar vazamento.
+          TXT
+
+          file "$OUT/highgas-helper" | grep -Eqi 'x86_64|x86-64'
+          file "$OUT/wireguard-go" | grep -Eqi 'x86_64|x86-64'
+          file "$OUT/tun2socks" | grep -Eqi 'x86_64|x86-64'
+          file "$OUT/tor-expert/tor/tor" | grep -Eqi 'x86_64|x86-64'
+          find "$OUT" -maxdepth 2 -type f -print | sort
+
+          echo '--- macOS minimum-version metadata ---'
+          for f in "$OUT/highgas-helper" "$OUT/wireguard-go" "$OUT/tun2socks" "$OUT/tor-expert/tor/tor"; do
+            echo "FILE=$f"
+            /usr/bin/otool -l "$f" | awk '
+              /LC_BUILD_VERSION/{show=1; next}
+              show && /minos/{print "minos=" $2; show=0}
+              /LC_VERSION_MIN_MACOSX/{legacy=1; next}
+              legacy && /version/{print "minos=" $2; legacy=0}
+            ' | head -1
+          done
+
+          shasum -a 256 "$OUT/highgas-helper" "$OUT/tun2socks" "$OUT/tor-expert/tor/tor" > "$OUT/SHA256SUMS.txt"
+          echo "PACKAGE_DIR=$OUT" >> "$GITHUB_ENV"
+
+      - name: Run the real installer and local helper integration
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$PACKAGE_DIR"
+          cleanup(){
+            HIGHGAS_CI=1 "$OUT/uninstall.command" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          HIGHGAS_CI=1 "$OUT/install.command"
+          SYSTEM='/Library/Application Support/HighGAS'
+          CA="$SYSTEM/certs/highgas-local-ca.crt"
+          TOKEN="$(sudo cat "$SYSTEM/helper.token" | tr -d '\r\n ')"
+          test "${#TOKEN}" -ge 32
+
+          api(){
+            local method="$1" path="$2" body="${3:-}"
+            if [ "$method" = GET ]; then
+              sudo /usr/bin/curl -fsS --max-time 260 --cacert "$CA" \
+                -H "Authorization: Bearer $TOKEN" -H 'Accept: application/json' \
+                "https://127.0.0.1:37654$path"
+            else
+              sudo /usr/bin/curl -fsS --max-time 260 --cacert "$CA" \
+                -X "$method" -H "Authorization: Bearer $TOKEN" \
+                -H 'Accept: application/json' -H 'Content-Type: application/json' \
+                -d "$body" "https://127.0.0.1:37654$path"
+            fi
+          }
+
+          HEALTH="$(api GET /v1/health)"
+          printf '%s' "$HEALTH" | grep -q '"version":"1.0.0"'
+          printf '%s' "$HEALTH" | grep -q '"torReady":true'
+          printf '%s' "$HEALTH" | grep -q '"controllerReady":true'
+          printf '%s' "$HEALTH" | grep -q '"engine":"highgas-full-tunnel"'
+
+          SERVERS="$(api GET /api/servers)"
+          printf '%s' "$SERVERS" | grep -q '"code":"de-fra-01"'
+          printf '%s' "$SERVERS" | grep -q '"code":"us-mia-01"'
+          printf '%s' "$SERVERS" | grep -q '"protocol":"tor"'
+
+          JS="$(sudo /usr/bin/curl -fsS --cacert "$CA" https://127.0.0.1:37654/highgas-local-controller.js)"
+          printf '%s' "$JS" | grep -q 'HighGAS Full Tunnel'
+          printf '%s' "$JS" | grep -q '5/5 protegidos'
+          printf '%s' "$JS" | grep -q 'DESLIGAR VPN'
+
+          STATUS0="$(api GET /v1/status)"
+          printf '%s' "$STATUS0" | grep -q '"connected":false'
+
+          for spec in 'de-fra-01 DE' 'us-mia-01 US'; do
+            set -- $spec
+            SERVER="$1"; EXPECTED="$2"
+            echo "INTEGRATION_CONNECT=$SERVER"
+            CONNECT="$(api POST /v1/connect "{\"server\":\"$SERVER\"}")"
+            printf '%s' "$CONNECT" | grep -q '"ok":true'
+            printf '%s' "$CONNECT" | grep -q '"mode":"tor"'
+            STATUS="$(api GET /v1/status)"
+            printf '%s' "$STATUS" | grep -q '"connected":true'
+            printf '%s' "$STATUS" | grep -q "\"activeServer\":\"$SERVER\""
+            printf '%s' "$STATUS" | grep -q "\"country\":\"$EXPECTED\""
+            NET="$(api GET /api/network-info)"
+            printf '%s' "$NET"
+            printf '%s' "$NET" | grep -q "\"country\":\"$EXPECTED\""
+            VERIFY="$(sudo "$SYSTEM/highgas-tor" verify)"
+            printf '%s\n' "$VERIFY"
+            printf '%s\n' "$VERIFY" | grep -q '^VERIFIED=1$'
+            printf '%s\n' "$VERIFY" | grep -q '^DNS_OK=1$'
+            printf '%s\n' "$VERIFY" | grep -q '^IPV6_OK=1$'
+            printf '%s\n' "$VERIFY" | grep -q '^ROUTE_OK=1$'
+            DISC="$(api POST /v1/disconnect '{}')"
+            printf '%s' "$DISC" | grep -q '"ok":true'
+            STATUSD="$(api GET /v1/status)"
+            printf '%s' "$STATUSD" | grep -q '"connected":false'
+          done
+
+          HIGHGAS_CI=1 "$OUT/uninstall.command"
+          trap - EXIT
+          ! sudo test -e "$SYSTEM"
+          ! sudo test -e /Library/LaunchDaemons/app.highgas.helper.plist
+          curl -4 -fsS --max-time 15 https://lowgas.vercel.app/api/network-info | grep -q '"ip"'
+          echo 'REAL_INSTALLER_AND_HELPER_INTEGRATION=PASS'
+
+      - name: Final package integrity checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$PACKAGE_DIR"
+          REQUIRED=(highgas-helper highgas-tunnel highgas-tor wireguard-go tun2socks install.command uninstall.command highgas-local-controller.js TOR-NOTICE.txt TUN2SOCKS-NOTICE.txt LEIA-ME.txt SHA256SUMS.txt)
+          for f in "${REQUIRED[@]}"; do test -s "$OUT/$f"; done
+          test -x "$OUT/tor-expert/tor/tor"
+          test -s "$OUT/tor-expert/data/geoip"
+          test -s "$OUT/tor-expert/data/geoip6"
+          (cd "$OUT" && shasum -a 256 -c SHA256SUMS.txt)
+          echo 'FINAL_PACKAGE_INTEGRITY=PASS'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: HighGAS-Final-macOS-Intel
+          path: ${{ env.PACKAGE_DIR }}/
+          if-no-files-found: error
+          retention-days: 30
