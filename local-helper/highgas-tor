@@ -159,7 +159,7 @@ baseline_ip() {
 }
 
 pf_enable_and_load() {
-  local dev="$1" gw="$2" status rules token=""
+  local dev="$1" gw="$2" pfstate rules token=""
   rules="$(/usr/bin/mktemp -t highgas-pf).conf"
   cat > "$rules" <<EOF_PF
 pass out quick on lo0 all
@@ -170,8 +170,8 @@ EOF_PF
 
   /sbin/pfctl -nf "$rules" >/dev/null 2>&1 || { /bin/rm -f "$rules"; print -u2 "o kill switch do macOS rejeitou as regras de segurança"; return 1; }
 
-  status="$(/sbin/pfctl -s info 2>/dev/null | /usr/bin/awk '/Status:/{print $2;exit}')"
-  if [[ "$status" != "Enabled" ]]; then
+  pfstate="$(/sbin/pfctl -s info 2>/dev/null | /usr/bin/awk '/Status:/{print $2;exit}')"
+  if [[ "$pfstate" != "Enabled" ]]; then
     token="$(/sbin/pfctl -E 2>&1 | /usr/bin/sed -n 's/.*Token[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p' | /usr/bin/tail -1)"
     [[ -n "$token" ]] && print -r -- "$token" > "$PFTOKEN"
   fi
