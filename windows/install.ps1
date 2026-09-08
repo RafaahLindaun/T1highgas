@@ -10,6 +10,17 @@ function Assert-Admin {
   }
 }
 
+function Stop-HighGASOwnedProcesses([string]$Root) {
+  Get-Process highgas-helper,sing-box,tor -ErrorAction SilentlyContinue | ForEach-Object {
+    try {
+      $processPath = $_.Path
+      if ($processPath -and $processPath.StartsWith($Root, [StringComparison]::OrdinalIgnoreCase)) {
+        Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+      }
+    } catch {}
+  }
+}
+
 Assert-Admin
 $Package = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Payload = Join-Path $Package 'payload'
@@ -33,7 +44,7 @@ try {
 } catch {}
 try { schtasks.exe /End /TN $Task *> $null } catch {}
 try { schtasks.exe /Delete /TN $Task /F *> $null } catch {}
-Get-Process highgas-helper,sing-box,tor -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+Stop-HighGASOwnedProcesses $Base
 
 New-Item -ItemType Directory -Force -Path $Base | Out-Null
 Copy-Item -Path (Join-Path $Payload '*') -Destination $Base -Recurse -Force
