@@ -213,7 +213,7 @@ routes_ok() {
 
 tor_probe() {
   local expected="$1" raw ip country
-  raw="$(/usr/bin/curl -4 -fsS --socks5-hostname "127.0.0.1:$SOCKS_PORT" --connect-timeout 8 --max-time 25 -H 'Accept: application/json' "$CHECK_URL?torprobe=$(/bin/date +%s)" 2>/dev/null || true)"
+  raw="$(/usr/bin/curl -4 -fsS --socks5-hostname "127.0.0.1:$SOCKS_PORT" --connect-timeout 5 --max-time 10 -H 'Accept: application/json' "$CHECK_URL?torprobe=$(/bin/date +%s)" 2>/dev/null || true)"
   ip="$(print -r -- "$raw" | /usr/bin/sed -n 's/.*"ip"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
   country="$(print -r -- "$raw" | /usr/bin/sed -n 's/.*"country"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | /usr/bin/tr '[:lower:]' '[:upper:]')"
   [[ -n "$ip" && "$country" == "$expected" ]] || return 1
@@ -368,7 +368,13 @@ up() {
   done
   [[ "$booted" -eq 1 ]] || { print -u2 "Tor demorou demais para conectar"; down >/dev/null 2>&1 || true; return 7; }
 
-  torprobe="$(tor_probe "$expected" 2>/dev/null || true)"
+  # O bootstrap 100% confirma a rede Tor, mas o primeiro circuito de saída
+  # ainda pode levar alguns segundos. Tenta novamente antes de desistir.
+  for _ in {1..12}; do
+    torprobe="$(tor_probe "$expected" 2>/dev/null || true)"
+    [[ -n "$torprobe" ]] && break
+    /bin/sleep 1
+  done
   [[ -n "$torprobe" ]] || { print -u2 "o Tor conectou, mas não confirmou a saída $expected"; down >/dev/null 2>&1 || true; return 7; }
   print -r -- "TOR_PROBE_IP=${torprobe%%|*}" >> "$STATE"
 

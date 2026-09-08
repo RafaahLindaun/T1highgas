@@ -270,7 +270,7 @@
     startCheckAnimation();
     paint();
     try {
-      await request("/v1/connect", { method: "POST", timeoutMs: 180000, body: JSON.stringify({ server: selectedServer() }) });
+      await request("/v1/connect", { method: "POST", timeoutMs: 250000, body: JSON.stringify({ server: selectedServer() }) });
       connected = true;
       activeServer = selectedServer();
       verifyStage = 5;
