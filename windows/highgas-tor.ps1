@@ -17,6 +17,8 @@ $TorPid = Join-Path $Runtime 'tor.pid'
 $SingPid = Join-Path $Runtime 'singbox.pid'
 $SingConfig = Join-Path $Runtime 'sing-box.json'
 $StateFile = Join-Path $Runtime 'state.json'
+$StageLog = Join-Path $Runtime 'connect-stage.log'
+$CiBypassFlag = Join-Path $Base 'ci-runner-bypass.flag'
 $CheckUrl = 'https://lowgas.vercel.app/api/network-info'
 $SocksPort = 39050
 $DnsPort = 39053
@@ -36,6 +38,13 @@ function Ensure-Runtime {
 
 function Write-Utf8NoBom([string]$Path, [string]$Text) {
   [IO.File]::WriteAllText($Path, $Text, (New-Object Text.UTF8Encoding($false)))
+}
+
+function Write-Stage([string]$Name) {
+  try {
+    Ensure-Runtime
+    Add-Content -Path $StageLog -Value ("{0:o} {1}" -f [DateTime]::UtcNow,$Name) -Encoding utf8
+  } catch {}
 }
 
 function Read-Pid([string]$Path) {
@@ -71,8 +80,19 @@ function Invoke-NetworkInfo([switch]$ThroughTor) {
   $curlArgs = @('-fsS','--connect-timeout','12','--max-time','25','-H','Cache-Control: no-cache')
   if ($ThroughTor) { $curlArgs += @('--socks5-hostname',"127.0.0.1:$SocksPort") }
   $curlArgs += "${CheckUrl}?ts=$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())"
-  $raw = & curl.exe @curlArgs 2>$null
-  if ($LASTEXITCODE -ne 0 -or -not $raw) { throw 'network_info_failed' }
+  $oldErrorActionPreference = $ErrorActionPreference
+  $hasNativePreference = Test-Path variable:PSNativeCommandUseErrorActionPreference
+  if ($hasNativePreference) { $oldNativePreference = $PSNativeCommandUseErrorActionPreference }
+  try {
+    $ErrorActionPreference = 'Continue'
+    if ($hasNativePreference) { $PSNativeCommandUseErrorActionPreference = $false }
+    $raw = & curl.exe @curlArgs 2>$null
+    $curlExit = $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $oldErrorActionPreference
+    if ($hasNativePreference) { $PSNativeCommandUseErrorActionPreference = $oldNativePreference }
+  }
+  if ($curlExit -ne 0 -or -not $raw) { throw "network_info_failed exit=$curlExit" }
   return ($raw | Out-String | ConvertFrom-Json)
 }
 
@@ -112,46 +132,48 @@ function Wait-TorBootstrap {
 }
 
 function Write-SingBoxConfig {
-  $config = @'
-{
-  "log": { "level": "info", "timestamp": true },
-  "dns": {
-    "servers": [
-      { "type": "udp", "tag": "tor-dns", "server": "127.0.0.1", "server_port": 39053 }
-    ],
-    "final": "tor-dns",
-    "strategy": "ipv4_only",
-    "timeout": "10s"
-  },
-  "inbounds": [
-    {
-      "type": "tun",
-      "tag": "highgas-tun",
-      "interface_name": "HighGAS",
-      "address": ["172.19.0.1/30", "fdfe:dcba:9876::1/126"],
-      "mtu": 1500,
-      "auto_route": true,
-      "strict_route": true,
-      "stack": "system"
+  $rules = @()
+  if (Test-Path $CiBypassFlag) {
+    $rules += [ordered]@{
+      process_name = @('Runner.Listener.exe','Runner.Listener','Runner.Worker.exe','Runner.Worker','hosted-compute-agent.exe','hosted-compute-agent','provjobd.exe','provjobd')
+      action = 'route'
+      outbound = 'direct'
     }
-  ],
-  "outbounds": [
-    { "type": "direct", "tag": "direct" },
-    { "type": "socks", "tag": "tor-socks", "server": "127.0.0.1", "server_port": 39050, "version": "5", "network": "tcp" }
-  ],
-  "route": {
-    "auto_detect_interface": true,
-    "rules": [
-      { "protocol": "dns", "action": "hijack-dns" },
-      { "process_name": ["tor.exe"], "action": "route", "outbound": "direct" },
-      { "ip_version": 6, "action": "reject" },
-      { "network": "udp", "action": "reject" }
-    ],
-    "final": "tor-socks"
   }
-}
-'@
-  Write-Utf8NoBom $SingConfig $config
+  $rules += [ordered]@{ protocol = 'dns'; action = 'hijack-dns' }
+  $rules += [ordered]@{ process_name = @('tor.exe'); action = 'route'; outbound = 'direct' }
+  $rules += [ordered]@{ ip_version = 6; action = 'reject' }
+  $rules += [ordered]@{ network = @('udp'); action = 'reject' }
+
+  $config = [ordered]@{
+    log = [ordered]@{ level = 'info'; timestamp = $true }
+    dns = [ordered]@{
+      servers = @([ordered]@{ type='udp'; tag='tor-dns'; server='127.0.0.1'; server_port=39053 })
+      final = 'tor-dns'
+      strategy = 'ipv4_only'
+      timeout = '10s'
+    }
+    inbounds = @([ordered]@{
+      type = 'tun'
+      tag = 'highgas-tun'
+      interface_name = 'HighGAS'
+      address = @('172.19.0.1/30','fdfe:dcba:9876::1/126')
+      mtu = 1500
+      auto_route = $true
+      strict_route = $true
+      stack = 'system'
+    })
+    outbounds = @(
+      [ordered]@{ type='direct'; tag='direct' },
+      [ordered]@{ type='socks'; tag='tor-socks'; server='127.0.0.1'; server_port=39050; version='5'; network='tcp' }
+    )
+    route = [ordered]@{
+      auto_detect_interface = $true
+      rules = $rules
+      final = 'tor-socks'
+    }
+  }
+  Write-Utf8NoBom $SingConfig ($config | ConvertTo-Json -Depth 12)
 }
 
 function Assert-SingBoxConfig {
@@ -214,41 +236,65 @@ function Recover-HighGAS {
 function Connect-HighGAS([string]$Code) {
   Assert-Admin
   Ensure-Runtime
+  Remove-Item -Force $StageLog -ErrorAction SilentlyContinue
+  Write-Stage 'begin'
   if (-not (Test-Path $TorExe)) { throw "Tor not found: $TorExe" }
   if (-not (Test-Path $SingBoxExe)) { throw "sing-box not found: $SingBoxExe" }
   if (-not (Test-Path (Join-Path $TorDataDir 'geoip'))) { throw 'Tor geoip data missing.' }
   if (-not (Test-Path (Join-Path $TorDataDir 'geoip6'))) { throw 'Tor geoip6 data missing.' }
   $target = Get-Target $Code
+
+  Write-Stage 'recover:start'
   Recover-HighGAS
+  Write-Stage 'recover:done'
+
+  Write-Stage 'baseline:start'
   $baseline = Invoke-NetworkInfo
+  Write-Stage "baseline:done country=$($baseline.country) ip=$($baseline.ip)"
 
   Remove-Item -Force $TorLog -ErrorAction SilentlyContinue
   Write-TorConfig $target
   $torOut = Join-Path $Runtime 'tor.stdout.log'
   $torErr = Join-Path $Runtime 'tor.stderr.log'
+  Write-Stage 'tor:start'
   $tor = Start-Tracked -File $TorExe -ProcessArgs @('-f',$Torrc) -PidPath $TorPid -Stdout $torOut -Stderr $torErr
   Wait-TorBootstrap
+  Write-Stage 'tor:bootstrapped'
 
+  Write-Stage 'tor-verify:start'
   $torInfo = Invoke-NetworkInfo -ThroughTor
   if (([string]$torInfo.country).ToUpperInvariant() -ne $target.country) {
     throw "Tor exit country mismatch. expected=$($target.country) got=$($torInfo.country)"
   }
   if ($baseline.ip -and $torInfo.ip -and $baseline.ip -eq $torInfo.ip) { throw 'Tor did not change public IP.' }
+  Write-Stage "tor-verify:done country=$($torInfo.country) ip=$($torInfo.ip)"
 
+  Write-Stage 'sing-config:start'
   Write-SingBoxConfig
   Assert-SingBoxConfig
+  Write-Stage 'sing-config:done'
   $singOut = Join-Path $Runtime 'singbox.stdout.log'
   $singErr = Join-Path $Runtime 'singbox.stderr.log'
+  Write-Stage 'sing:start'
   $sing = Start-Tracked -File $SingBoxExe -ProcessArgs @('run','-c',$SingConfig) -PidPath $SingPid -Stdout $singOut -Stderr $singErr
   Start-Sleep -Seconds 5
   if ($sing.HasExited) { throw "sing-box exited: $(Get-Content $singErr -Tail 100 -ErrorAction SilentlyContinue | Out-String)" }
+  Write-Stage 'sing:alive'
 
+  Write-Stage 'system-verify:start'
   $systemInfo = Invoke-NetworkInfo
+  Write-Stage "system-verify:network country=$($systemInfo.country) ip=$($systemInfo.ip)"
   $countryOk = (([string]$systemInfo.country).ToUpperInvariant() -eq $target.country)
   $ipChanged = ($systemInfo.ip -and $baseline.ip -and $systemInfo.ip -ne $baseline.ip)
   $torMatch = ($systemInfo.ip -and $torInfo.ip -and $systemInfo.ip -eq $torInfo.ip)
+
+  Write-Stage 'ipv6:start'
   $ipv6Blocked = Test-IPv6Blocked
+  Write-Stage "ipv6:done blocked=$ipv6Blocked"
+
+  Write-Stage 'adapter:start'
   $adapter = [bool](Get-NetAdapter -Name 'HighGAS' -ErrorAction SilentlyContinue)
+  Write-Stage "adapter:done present=$adapter"
   $singAlive = -not $sing.HasExited
   $torAlive = -not $tor.HasExited
   $checks = [ordered]@{
@@ -262,7 +308,9 @@ function Connect-HighGAS([string]$Code) {
   }
   $failed = @($checks.GetEnumerator() | Where-Object { -not $_.Value })
   if ($failed.Count -gt 0) { throw "Full-tunnel verification failed: $($failed.Name -join ', ')" }
+  Write-Stage 'state:save'
   Save-State $Code $target.country ([string]$systemInfo.ip) $checks
+  Write-Stage 'complete'
   [ordered]@{ok=$true;server=$Code;country=$target.country;ip=$systemInfo.ip;checks=$checks} | ConvertTo-Json -Depth 5 -Compress
 }
 
@@ -304,8 +352,12 @@ try {
     }
     'self-test' { Self-Test }
   }
+  exit 0
 } catch {
-  if ($Command -eq 'connect') { try { Recover-HighGAS } catch {} }
+  if ($Command -eq 'connect') {
+    Write-Stage ("error: " + $_.Exception.Message)
+    try { Recover-HighGAS } catch {}
+  }
   Write-Error $_
   exit 1
 }
