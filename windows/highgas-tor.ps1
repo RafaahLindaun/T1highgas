@@ -174,8 +174,19 @@ function Start-Tracked {
 }
 
 function Test-IPv6Blocked {
-  & curl.exe -6 -fsS --connect-timeout 4 --max-time 7 'https://api64.ipify.org' *> $null
-  return ($LASTEXITCODE -ne 0)
+  $oldErrorActionPreference = $ErrorActionPreference
+  $hasNativePreference = Test-Path variable:PSNativeCommandUseErrorActionPreference
+  if ($hasNativePreference) { $oldNativePreference = $PSNativeCommandUseErrorActionPreference }
+  try {
+    $ErrorActionPreference = 'Continue'
+    if ($hasNativePreference) { $PSNativeCommandUseErrorActionPreference = $false }
+    & curl.exe -6 -fsS --connect-timeout 4 --max-time 7 'https://api64.ipify.org' *> $null
+    $probeExit = $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $oldErrorActionPreference
+    if ($hasNativePreference) { $PSNativeCommandUseErrorActionPreference = $oldNativePreference }
+  }
+  return ($probeExit -ne 0)
 }
 
 function Save-State([string]$Server,[string]$Country,[string]$Ip,[hashtable]$Checks) {
