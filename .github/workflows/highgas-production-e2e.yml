@@ -1,0 +1,139 @@
+name: HighGAS Production E2E
+
+on:
+  push:
+    branches: [highgas-full-tunnel-v1]
+    paths:
+      - "local-helper/highgas-tor"
+      - "local-helper/install.command"
+      - "public/highgas-local-controller.js"
+      - ".github/workflows/highgas-production-e2e.yml"
+  workflow_dispatch:
+
+env:
+  TOR_EXPERT_VERSION: "15.0.21"
+  TUN2SOCKS_VERSION: "2.7.0"
+  TUN2SOCKS_AMD64_SHA256: "6e654da8bab9ca1645862f0e251a69980e0966680713011feea7b1e5901b2a95"
+
+jobs:
+  production-full-tunnel:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - server: de-fra-01
+            expected: DE
+          - server: us-mia-01
+            expected: US
+    runs-on: macos-15-intel
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Stage exact HighGAS production engine
+        shell: bash
+        run: |
+          set -euo pipefail
+          SYSTEM="/Library/Application Support/HighGAS"
+          curl -fL --retry 3 "https://archive.torproject.org/tor-package-archive/torbrowser/${TOR_EXPERT_VERSION}/tor-expert-bundle-macos-x86_64-${TOR_EXPERT_VERSION}.tar.gz" -o /tmp/tor.tgz
+          curl -fL --retry 3 "https://github.com/xjasonlyu/tun2socks/releases/download/v${TUN2SOCKS_VERSION}/tun2socks-darwin-amd64.zip" -o /tmp/t2s.zip
+          echo "${TUN2SOCKS_AMD64_SHA256}  /tmp/t2s.zip" | shasum -a 256 -c -
+          rm -rf /tmp/hg-tor /tmp/hg-t2s
+          mkdir -p /tmp/hg-tor /tmp/hg-t2s
+          tar -xzf /tmp/tor.tgz -C /tmp/hg-tor
+          unzip -q /tmp/t2s.zip -d /tmp/hg-t2s
+          TUN="$(find /tmp/hg-t2s -type f -name 'tun2socks*' ! -name '*.zip' ! -name '*LICENSE*' -print -quit)"
+          test -n "$TUN" && test -f "$TUN"
+          sudo mkdir -p "$SYSTEM"
+          sudo rm -rf "$SYSTEM/tor-expert" "$SYSTEM/tor-runtime" "$SYSTEM/tor-state"
+          sudo cp -R /tmp/hg-tor "$SYSTEM/tor-expert"
+          sudo cp "$TUN" "$SYSTEM/tun2socks"
+          sudo cp local-helper/highgas-tor "$SYSTEM/highgas-tor"
+          sudo chown -R root:wheel "$SYSTEM"
+          sudo chmod 711 "$SYSTEM"
+          sudo find "$SYSTEM/tor-expert" -type d -exec chmod 755 {} +
+          sudo find "$SYSTEM/tor-expert" -type f -exec chmod 644 {} +
+          sudo chmod 755 "$SYSTEM/tor-expert/tor/tor" "$SYSTEM/tun2socks" "$SYSTEM/highgas-tor"
+          sudo -u _www test -r "$SYSTEM/tor-expert/data/geoip"
+          sudo -u _www test -r "$SYSTEM/tor-expert/data/geoip6"
+          file "$SYSTEM/tun2socks" | grep -Eqi 'x86_64|x86-64'
+          file "$SYSTEM/tor-expert/tor/tor" | grep -Eqi 'x86_64|x86-64'
+          zsh -n "$SYSTEM/highgas-tor"
+
+      - name: Run 30+ exact production checks
+        shell: bash
+        env:
+          SERVER: ${{ matrix.server }}
+          EXPECTED: ${{ matrix.expected }}
+        run: |
+          set -euo pipefail
+          SYSTEM="/Library/Application Support/HighGAS"
+          HG="$SYSTEM/highgas-tor"
+          C=0
+          pass(){ C=$((C+1)); echo "PROD_PASS $C - $1"; }
+          trap 'sudo "$HG" down >/dev/null 2>&1 || true' EXIT
+
+          test "$(uname -m)" = x86_64 && pass intel-runner
+          id _www >/dev/null && pass isolated-user
+          command -v /sbin/pfctl >/dev/null && pass pfctl-present
+          command -v /usr/sbin/networksetup >/dev/null && pass networksetup-present
+          command -v /usr/bin/dig >/dev/null && pass dig-present
+          sudo test -x "$HG" && pass production-script-installed
+          sudo test -x "$SYSTEM/tun2socks" && pass tun2socks-installed
+          sudo test -x "$SYSTEM/tor-expert/tor/tor" && pass tor-installed
+          sudo -u _www test -r "$SYSTEM/tor-expert/data/geoip" && pass geoip-readable-by-tor
+          sudo -u _www test -r "$SYSTEM/tor-expert/data/geoip6" && pass geoip6-readable-by-tor
+
+          RI="$(/sbin/route -n get default)"
+          DEV="$(printf '%s\n' "$RI" | awk '/interface:/{print $2;exit}')"
+          GW="$(printf '%s\n' "$RI" | awk '/gateway:/{print $2;exit}')"
+          test -n "$DEV" && pass baseline-device
+          test -n "$GW" && pass baseline-gateway
+          BASE="$(curl -4 -fsS --interface "$DEV" --connect-timeout 5 --max-time 15 https://lowgas.vercel.app/api/network-info)"
+          BASEIP="$(printf '%s' "$BASE" | sed -n 's/.*"ip"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+          test -n "$BASEIP" && pass baseline-public-ip
+
+          OUT="$(sudo "$HG" up "$SERVER")"
+          printf '%s\n' "$OUT"
+          printf '%s\n' "$OUT" | grep -q '^connected tor ' && pass production-up-connected
+          printf '%s\n' "$OUT" | grep -q " $SERVER " && pass selected-server-active
+
+          STATUS="$(sudo "$HG" status)"
+          printf '%s\n' "$STATUS"
+          printf '%s\n' "$STATUS" | grep -q '^connected tor ' && pass production-status-connected
+          printf '%s\n' "$STATUS" | grep -q " $SERVER " && pass status-server-match
+
+          VERIFY="$(sudo "$HG" verify)"
+          printf '%s\n' "$VERIFY"
+          printf '%s\n' "$VERIFY" | grep -q '^VERIFIED=1$' && pass verified-aggregate
+          printf '%s\n' "$VERIFY" | grep -q '^IP_CHANGED=1$' && pass ip-changed
+          printf '%s\n' "$VERIFY" | grep -q '^COUNTRY_OK=1$' && pass country-verified
+          printf '%s\n' "$VERIFY" | grep -q '^DNS_OK=1$' && pass dns-protected
+          printf '%s\n' "$VERIFY" | grep -q '^IPV6_OK=1$' && pass ipv6-no-leak
+          printf '%s\n' "$VERIFY" | grep -q '^ROUTE_OK=1$' && pass routes-and-killswitch
+          VPNIP="$(printf '%s\n' "$VERIFY" | awk -F= '/^IP=/{print $2;exit}')"
+          VPNCC="$(printf '%s\n' "$VERIFY" | awk -F= '/^COUNTRY=/{print $2;exit}')"
+          test -n "$VPNIP" && pass vpn-public-ip-present
+          test "$VPNIP" != "$BASEIP" && pass vpn-ip-different-from-baseline
+          test "$VPNCC" = "$EXPECTED" && pass vpn-country-exact
+
+          STATE="$SYSTEM/tor-state"
+          IFACE="$(sudo awk -F= '$1=="IFACE"{print $2;exit}' "$STATE")"
+          PHY="$(sudo awk -F= '$1=="DEVICE"{print $2;exit}' "$STATE")"
+          test -n "$IFACE" && pass tunnel-interface-recorded
+          /sbin/ifconfig "$IFACE" >/dev/null && pass tunnel-interface-live
+          /sbin/route -n get 1.1.1.1 | grep -q "interface: $IFACE" && pass public-route-through-tunnel
+          sudo /sbin/pfctl -a com.apple/highgas -sr | grep -q "block drop out quick on $PHY inet" && pass ipv4-killswitch-loaded
+          sudo /sbin/pfctl -a com.apple/highgas -sr | grep -q 'block drop out quick inet6' && pass ipv6-killswitch-loaded
+
+          sudo "$HG" down | grep -q '^disconnected$' && pass production-down
+          test "$(sudo "$HG" status)" = disconnected && pass status-disconnected
+          ! /sbin/ifconfig "$IFACE" >/dev/null 2>&1 && pass tunnel-interface-closed
+          /sbin/route -n get 1.1.1.1 | grep -q "interface: $DEV" && pass direct-route-restored
+          RESTORED="$(curl -4 -fsS --interface "$DEV" --connect-timeout 5 --max-time 15 https://lowgas.vercel.app/api/network-info)"
+          RESTOREDIP="$(printf '%s' "$RESTORED" | sed -n 's/.*"ip"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+          test -n "$RESTOREDIP" && pass internet-restored
+
+          trap - EXIT
+          echo "PRODUCTION_E2E_TESTS=$C"
+          test "$C" -ge 36
