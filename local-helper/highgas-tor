@@ -160,11 +160,12 @@ baseline_ip() {
 }
 
 pf_enable_and_load() {
-  local dev="$1" gw="$2" pfstate rules token=""
+  local dev="$1" gw="$2" iface="$3" pfstate rules token=""
   rules="$(/usr/bin/mktemp -t highgas-pf).conf"
   cat > "$rules" <<EOF_PF
 pass out quick on lo0 all
-pass out quick route-to ($dev $gw) inet proto tcp user $PFUSER keep state
+pass out quick on $dev inet proto tcp user $PFUSER keep state
+pass out quick on $iface route-to ($dev $gw) inet proto tcp user $PFUSER keep state
 block drop out quick on $dev inet all
 block drop out quick inet6 all
 EOF_PF
@@ -366,9 +367,6 @@ up() {
   } > "$STATE"
   /bin/chmod 600 "$STATE"
 
-  # Fail-closed: o kill switch entra antes do túnel assumir o tráfego.
-  pf_enable_and_load "$dev" "$gw" || { down >/dev/null 2>&1 || true; return 9; }
-
   # O proxy está em localhost. Não prender tun2socks à interface física: isso
   # pode impedir a conexão com 127.0.0.1. Quem sai fisicamente é o Tor (_www),
   # explicitamente autorizado pelo PF acima.
@@ -386,8 +384,13 @@ up() {
   [[ "$iface" =~ ^utun[0-9]+$ ]] || { print -u2 "nome de interface Full Tunnel inválido: $iface"; down >/dev/null 2>&1 || true; return 10; }
   /sbin/ifconfig "$iface" >/dev/null 2>&1 || { print -u2 "a interface Full Tunnel não foi criada"; down >/dev/null 2>&1 || true; return 10; }
   print -r -- "IFACE=$iface" >> "$STATE"
-
   /sbin/ifconfig "$iface" inet "$TUN_ADDR" "$TUN_ADDR" up >/dev/null
+
+  # Fail-closed: agora que o utun real existe, o PF consegue mandar somente o
+  # processo Tor de volta à interface física. O tráfego dos apps permanece
+  # bloqueado na interface física e, em seguida, passa a entrar pelo utun.
+  pf_enable_and_load "$dev" "$gw" "$iface" || { down >/dev/null 2>&1 || true; return 9; }
+
   local r
   for r in "${ROUTES[@]}"; do
     /sbin/route -q -n add -inet "$r" -interface "$iface" >/dev/null 2>&1 || { print -u2 "não consegui proteger a rota $r"; down >/dev/null 2>&1 || true; return 11; }
