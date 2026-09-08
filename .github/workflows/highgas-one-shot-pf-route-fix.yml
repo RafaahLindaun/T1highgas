@@ -1,0 +1,43 @@
+name: HighGAS One Shot PF Route Fix
+
+on:
+  push:
+    branches: [highgas-full-tunnel-v1]
+    paths: [".github/workflows/highgas-one-shot-pf-route-fix.yml"]
+
+permissions:
+  contents: write
+
+jobs:
+  patch-pf-route:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: highgas-full-tunnel-v1
+      - name: Keep Tor egress on physical interface after full routes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('local-helper/highgas-tor')
+          s = p.read_text()
+          old = 'pass out quick on $dev route-to ($dev $gw) inet proto tcp user $PFUSER keep state'
+          new = 'pass out quick route-to ($dev $gw) inet proto tcp user $PFUSER keep state'
+          if old not in s:
+              raise SystemExit('expected PF Tor egress rule not found')
+          s = s.replace(old, new, 1)
+          if old in s:
+              raise SystemExit('old PF Tor rule remains')
+          if new not in s:
+              raise SystemExit('new PF Tor route-to rule missing')
+          p.write_text(s)
+          PY
+          git diff --check
+          grep -Fq 'pass out quick route-to ($dev $gw) inet proto tcp user $PFUSER keep state' local-helper/highgas-tor
+          git config user.name 'HighGAS CI'
+          git config user.email '89591381+RafaahLindaun@users.noreply.github.com'
+          git add local-helper/highgas-tor
+          git commit -m 'HighGAS: manter tráfego Tor fora do túnel recursivo'
+          git push origin HEAD:highgas-full-tunnel-v1
