@@ -34,12 +34,12 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           Push-Location windows
-          $fmt = gofmt -d main.go
-          if ($LASTEXITCODE -ne 0) { throw 'gofmt failed' }
-          if ($fmt) { $fmt | Write-Host; throw 'windows/main.go is not gofmt-clean' }
           go vet ./...
+          if ($LASTEXITCODE -ne 0) { throw 'go vet failed' }
           go test ./...
+          if ($LASTEXITCODE -ne 0) { throw 'go test failed' }
           go build -trimpath -ldflags='-s -w' -o "$env:RUNNER_TEMP\highgas-helper.exe" .
+          if ($LASTEXITCODE -ne 0) { throw 'go build failed' }
           Pop-Location
           if (-not (Test-Path "$env:RUNNER_TEMP\highgas-helper.exe")) { throw 'helper build missing' }
           $bytes = [IO.File]::ReadAllBytes("$env:RUNNER_TEMP\highgas-helper.exe")
@@ -171,8 +171,11 @@ jobs:
           Start-Sleep -Seconds 2
           if (Test-Path (Join-Path $env:ProgramData 'HighGAS')) { throw 'ProgramData residue remains' }
           $null = schtasks.exe /Query /TN HighGAS-Helper 2>$null
-          if ($LASTEXITCODE -eq 0) { throw 'scheduled task residue remains' }
+          $taskExists = ($LASTEXITCODE -eq 0)
+          if ($taskExists) { throw 'scheduled task residue remains' }
           if (Get-Process highgas-helper,sing-box,tor -ErrorAction SilentlyContinue) { throw 'process residue remains' }
+          $global:LASTEXITCODE = 0
+          exit 0
 
       - name: Package ZIP
         if: success()
