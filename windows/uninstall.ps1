@@ -3,6 +3,17 @@ $Base = Join-Path $env:ProgramData 'HighGAS'
 $Task = 'HighGAS-Helper'
 $Cert = Join-Path $Base 'certs\server.crt'
 
+function Stop-HighGASOwnedProcesses([string]$Root) {
+  Get-Process highgas-helper,sing-box,tor -ErrorAction SilentlyContinue | ForEach-Object {
+    try {
+      $processPath = $_.Path
+      if ($processPath -and $processPath.StartsWith($Root, [StringComparison]::OrdinalIgnoreCase)) {
+        Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+      }
+    } catch {}
+  }
+}
+
 $id = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = New-Object Security.Principal.WindowsPrincipal($id)
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -13,7 +24,7 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 if (Test-Path (Join-Path $Base 'highgas-tor.ps1')) { & (Join-Path $Base 'highgas-tor.ps1') disconnect *> $null }
 schtasks.exe /End /TN $Task *> $null
 schtasks.exe /Delete /TN $Task /F *> $null
-Get-Process highgas-helper,sing-box,tor -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+Stop-HighGASOwnedProcesses $Base
 if (Test-Path $Cert) { certutil.exe -delstore Root "HighGAS Local Helper" *> $null }
 
 $shortcuts = @()
