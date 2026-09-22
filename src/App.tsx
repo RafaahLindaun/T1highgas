@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import JarvisPanel from "./components/JarvisPanel";
+import "./jarvis.css";
 import {
   fallbackServers,
   loadVpnServers,
