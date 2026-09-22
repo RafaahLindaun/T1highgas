@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import JarvisPanel from "./components/JarvisPanel";
 import {
   fallbackServers,
   loadVpnServers,
   type VpnServer,
 } from "./lib/highgasData";
 
-type Tab = "home" | "locations" | "setup" | "diagnostics";
+type Tab = "home" | "jarvis" | "locations" | "setup" | "diagnostics";
 
 type NetworkInfo = {
   ip: string | null;
@@ -17,6 +18,7 @@ type NetworkInfo = {
 
 const tabs: { id: Tab; label: string; icon: string }[] = [
   { id: "home", label: "Início", icon: "⌂" },
+  { id: "jarvis", label: "JARVIS", icon: "✦" },
   { id: "locations", label: "Países", icon: "◎" },
   { id: "setup", label: "Proteção", icon: "◇" },
   { id: "diagnostics", label: "Status", icon: "◉" },
@@ -361,6 +363,17 @@ function App() {
 
       <main className="main-content">
         {activeTab === "home" && renderHome()}
+        {activeTab === "jarvis" && (
+          <JarvisPanel
+            ip={network?.ip || null}
+            country={network?.country || null}
+            city={network?.city || null}
+            selectedCountry={selectedServer?.country_name || ""}
+            networkLoading={networkLoading}
+            onNavigate={setActiveTab}
+            onRefreshNetwork={checkNetwork}
+          />
+        )}
         {activeTab === "locations" && renderLocations()}
         {activeTab === "setup" && renderSetup()}
         {activeTab === "diagnostics" && renderDiagnostics()}
