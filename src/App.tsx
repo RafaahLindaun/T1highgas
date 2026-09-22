@@ -6,6 +6,7 @@ import {
   type VpnServer,
 } from "./lib/highgasData";
 
+// JARVIS web integration: dedicated voice-control tab.
 type Tab = "home" | "jarvis" | "locations" | "setup" | "diagnostics";
 
 type NetworkInfo = {
